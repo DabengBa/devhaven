@@ -1356,11 +1356,9 @@ mod tests {
         remove_worktree(&root_str, &worktree_str, false).expect("remove worktree");
 
         assert!(!worktree.exists());
-        assert!(
-            list_worktrees(&root_str)
-                .expect("list worktrees")
-                .is_empty()
-        );
+        assert!(list_worktrees(&root_str)
+            .expect("list worktrees")
+            .is_empty());
 
         let _ = fs::remove_dir_all(&worktree);
         let _ = fs::remove_dir_all(&root);

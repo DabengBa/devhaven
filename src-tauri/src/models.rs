@@ -72,11 +72,11 @@ pub struct AppSettings {
     #[serde(default = "default_terminal_theme")]
     pub terminal_theme: String,
     #[serde(default)]
-    pub show_monitor_window: bool,
-    #[serde(default)]
     pub git_identities: Vec<GitIdentity>,
     #[serde(default = "default_project_list_view_mode")]
     pub project_list_view_mode: ProjectListViewMode,
+    #[serde(default = "default_shared_scripts_root")]
+    pub shared_scripts_root: String,
 }
 
 impl Default for AppSettings {
@@ -86,9 +86,9 @@ impl Default for AppSettings {
             terminal_open_tool: OpenToolSettings::default(),
             terminal_use_webgl_renderer: true,
             terminal_theme: default_terminal_theme(),
-            show_monitor_window: false,
             git_identities: Vec::new(),
             project_list_view_mode: default_project_list_view_mode(),
+            shared_scripts_root: default_shared_scripts_root(),
         }
     }
 }
@@ -110,6 +110,10 @@ fn default_terminal_use_webgl_renderer() -> bool {
 
 fn default_terminal_theme() -> String {
     "DevHaven Dark".to_string()
+}
+
+fn default_shared_scripts_root() -> String {
+    "~/.devhaven/scripts".to_string()
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,6 +209,63 @@ pub struct ProjectScript {
     pub start: String,
     #[serde(default)]
     pub stop: Option<String>,
+    #[serde(default)]
+    pub param_schema: Vec<ScriptParamField>,
+    #[serde(default)]
+    pub template_params: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ScriptParamFieldType {
+    Text,
+    Number,
+    Secret,
+}
+
+impl Default for ScriptParamFieldType {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptParamField {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub r#type: ScriptParamFieldType,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub default_value: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedScriptEntry {
+    pub id: String,
+    pub name: String,
+    pub absolute_path: String,
+    pub relative_path: String,
+    pub command_template: String,
+    #[serde(default)]
+    pub params: Vec<ScriptParamField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedScriptManifestScript {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub command_template: String,
+    #[serde(default)]
+    pub params: Vec<ScriptParamField>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

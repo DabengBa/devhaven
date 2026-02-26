@@ -1,6 +1,4 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { emitTo, listen } from "@tauri-apps/api/event";
-import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { confirm } from "@tauri-apps/plugin-dialog";
 
 import Sidebar from "./components/Sidebar";
@@ -10,7 +8,6 @@ import TagEditDialog from "./components/TagEditDialog";
 import DashboardModal from "./components/DashboardModal";
 import SettingsModal from "./components/SettingsModal";
 import RecycleBinModal from "./components/RecycleBinModal";
-import MonitorWindow from "./components/MonitorWindow";
 import InteractionLockOverlay from "./components/InteractionLockOverlay";
 import CommandPalette, { type CommandPaletteItem } from "./components/CommandPalette";
 import WorktreeCreateDialog, {
@@ -34,7 +31,6 @@ import { buildCodexProjectStatusById } from "./utils/codexProjectStatus";
 import { DevHavenProvider, useDevHavenContext } from "./state/DevHavenContext";
 import { useHeatmapData } from "./state/useHeatmapData";
 import { copyToClipboard, sendSystemNotification } from "./services/system";
-import { closeMonitorWindow, openMonitorWindow } from "./services/monitorWindow";
 import { deleteTerminalWorkspace, listTerminalWorkspaceSummaries } from "./services/terminalWorkspace";
 import { gitDeleteBranch, gitWorktreeList, gitWorktreeRemove } from "./services/gitWorktree";
 import type { GitWorktreeListItem } from "./services/gitWorktree";
@@ -51,21 +47,12 @@ import {
   emitTerminalQuickCommandStop,
 } from "./services/terminalQuickCommands";
 
-const MONITOR_OPEN_SESSION_EVENT = "monitor-open-session";
-const MAIN_WINDOW_LABEL = "main";
 const TerminalWorkspaceWindow = lazy(() => import("./components/terminal/TerminalWorkspaceWindow"));
+const MAIN_WINDOW_LABEL = "main";
 
 type CommandPaletteAction = CommandPaletteItem & {
   searchText: string;
   run: () => void;
-};
-
-type MonitorOpenSessionPayload = {
-  sessionId: string;
-  projectId: string | null;
-  projectPath: string | null;
-  projectName: string | null;
-  cwd: string;
 };
 
 function createWorktreeProjectId(path: string): string {
@@ -228,17 +215,6 @@ function matchProjectByCwd(cwd: string, projects: Project[]): Project | null {
   return bestMatch;
 }
 
-function resolveAppView(): "main" | "monitor" {
-  if (typeof window === "undefined") {
-    return "main";
-  }
-  const params = new URLSearchParams(window.location.search);
-  if (params.get("view") === "monitor") {
-    return "monitor";
-  }
-  return "main";
-}
-
 function buildCodexSessionViews(sessions: CodexMonitorSession[], projects: Project[]): CodexSessionView[] {
   return sessions.map((session) => {
     const project = matchProjectByCwd(session.cwd, projects);
@@ -345,33 +321,19 @@ function AppLayout() {
     Record<string, GitWorktreeListItem[]>
   >({});
   const [worktreeDialogProjectId, setWorktreeDialogProjectId] = useState<string | null>(null);
-  const appView = useMemo(() => resolveAppView(), []);
-  const isMonitorView = appView === "monitor";
   const openCommandPalette = useCallback(() => {
-    if (isMonitorView || showTerminalWorkspace) {
+    if (showTerminalWorkspace) {
       return;
     }
     setCommandPaletteQuery("");
     setCommandPaletteActiveIndex(0);
     setIsCommandPaletteOpen(true);
-  }, [isMonitorView, showTerminalWorkspace]);
+  }, [showTerminalWorkspace]);
   const closeCommandPalette = useCallback(() => {
     setIsCommandPaletteOpen(false);
     setCommandPaletteQuery("");
     setCommandPaletteActiveIndex(0);
   }, []);
-
-  useEffect(() => {
-    if (typeof document === "undefined") {
-      return;
-    }
-    document.body.classList.toggle("is-monitor-view", isMonitorView);
-    document.documentElement.classList.toggle("is-monitor-view", isMonitorView);
-    return () => {
-      document.body.classList.remove("is-monitor-view");
-      document.documentElement.classList.remove("is-monitor-view");
-    };
-  }, [isMonitorView]);
 
   useEffect(() => {
     if (!import.meta.env.PROD || typeof window === "undefined") {
@@ -431,10 +393,10 @@ function AppLayout() {
   }, [isCommandPaletteOpen, openCommandPalette]);
 
   useEffect(() => {
-    if (isCommandPaletteOpen && (isMonitorView || showTerminalWorkspace)) {
+    if (isCommandPaletteOpen && showTerminalWorkspace) {
       closeCommandPalette();
     }
-  }, [closeCommandPalette, isCommandPaletteOpen, isMonitorView, showTerminalWorkspace]);
+  }, [closeCommandPalette, isCommandPaletteOpen, showTerminalWorkspace]);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const lastTerminalVisibleRef = useRef(showTerminalWorkspace);
@@ -493,10 +455,6 @@ function AppLayout() {
   );
   const codexProjectStatusById = useMemo(
     () => buildCodexProjectStatusById(codexSessionViews),
-    [codexSessionViews],
-  );
-  const runningCodexSessionViews = useMemo(
-    () => codexSessionViews.filter((session) => session.isRunning),
     [codexSessionViews],
   );
   const worktreeDialogSourceProject = useMemo(() => {
@@ -1310,7 +1268,7 @@ function AppLayout() {
   }, [addProjectWorktree, projects]);
 
   useEffect(() => {
-    if (isMonitorView || isLoading || terminalRestoreCheckedRef.current) {
+    if (isLoading || terminalRestoreCheckedRef.current) {
       return;
     }
 
@@ -1387,7 +1345,7 @@ function AppLayout() {
     return () => {
       cancelled = true;
     };
-  }, [isLoading, isMonitorView, projects]);
+  }, [isLoading, projects]);
 
   useEffect(() => {
     setTerminalOpenProjects((prev) =>
@@ -1643,10 +1601,6 @@ function AppLayout() {
   );
 
   useEffect(() => {
-    if (isMonitorView) {
-      return;
-    }
-
     let unlisten: (() => void) | null = null;
     const registerListener = async () => {
       try {
@@ -1662,7 +1616,7 @@ function AppLayout() {
     return () => {
       unlisten?.();
     };
-  }, [handleWorktreeInitProgress, isMonitorView]);
+  }, [handleWorktreeInitProgress]);
 
   useEffect(() => {
     if (!showTerminalWorkspace) {
@@ -1904,93 +1858,8 @@ function AppLayout() {
     [openTerminalWorkspace, resolveProjectFromCodexProjectId, showToast],
   );
 
-  const resolveProjectFromPayload = useCallback(
-    (payload: MonitorOpenSessionPayload) => {
-      if (payload.projectId) {
-        const resolved = resolveProjectFromCodexProjectId(payload.projectId);
-        if (resolved) {
-          return resolved;
-        }
-      }
-
-      if (payload.projectPath) {
-        const worktree = resolveWorktreeVirtualProjectByPath(projects, payload.projectPath);
-        if (worktree) {
-          return worktree;
-        }
-        const byPath = projects.find((item) => item.path === payload.projectPath) ?? null;
-        if (byPath) {
-          return byPath;
-        }
-      }
-
-      if (payload.projectName) {
-        const byName = projects.find((item) => item.name === payload.projectName) ?? null;
-        if (byName) {
-          return byName;
-        }
-      }
-
-      if (payload.cwd) {
-        return matchProjectByCwd(payload.cwd, codexProjectMatchCandidates);
-      }
-
-      return null;
-    },
-    [codexProjectMatchCandidates, projects, resolveProjectFromCodexProjectId],
-  );
-
-  const handleMonitorOpenCodexSession = useCallback(async (session: CodexSessionView) => {
-    try {
-      const mainWindow = await WebviewWindow.getByLabel(MAIN_WINDOW_LABEL);
-      if (mainWindow) {
-        await mainWindow.show().catch(() => undefined);
-        await mainWindow.setFocus().catch(() => undefined);
-      }
-      await emitTo<MonitorOpenSessionPayload>(MAIN_WINDOW_LABEL, MONITOR_OPEN_SESSION_EVENT, {
-        sessionId: session.id,
-        projectId: session.projectId,
-        projectPath: session.projectPath,
-        projectName: session.projectName,
-        cwd: session.cwd,
-      });
-    } catch (error) {
-      console.error("从悬浮窗跳转项目失败。", error);
-    }
-  }, []);
-
   useEffect(() => {
-    if (isMonitorView) {
-      return;
-    }
-    let unlisten: (() => void) | null = null;
-    const registerListener = async () => {
-      try {
-        unlisten = await listen<MonitorOpenSessionPayload>(MONITOR_OPEN_SESSION_EVENT, (event) => {
-          const payload = event.payload;
-          const project = resolveProjectFromPayload(payload);
-          if (!project) {
-            if (isLoading) {
-              showToast("项目加载中，请稍后重试");
-              return;
-            }
-            showToast("项目不存在或已移除", "error");
-            return;
-          }
-          openTerminalWorkspace(project);
-        });
-      } catch (error) {
-        console.error("监听悬浮窗跳转事件失败。", error);
-      }
-    };
-    void registerListener();
-    return () => {
-      unlisten?.();
-    };
-  }, [isLoading, isMonitorView, openTerminalWorkspace, resolveProjectFromPayload, showToast]);
-
-  useEffect(() => {
-    if (isMonitorView || codexMonitorStore.agentEvents.length === 0) {
+    if (codexMonitorStore.agentEvents.length === 0) {
       return;
     }
 
@@ -2028,12 +1897,7 @@ function AppLayout() {
         void sendSystemNotification("Codex 需要处理", projectName);
       }
     }
-  }, [
-    codexMonitorStore.agentEvents,
-    isMonitorView,
-    resolveProjectFromCodexEvent,
-    showToast,
-  ]);
+  }, [codexMonitorStore.agentEvents, resolveProjectFromCodexEvent, showToast]);
 
   const handleCloseSettings = useCallback(() => {
     setShowSettings(false);
@@ -2244,17 +2108,6 @@ function AppLayout() {
   );
 
   useEffect(() => {
-    if (isMonitorView) {
-      return;
-    }
-    if (appState.settings.showMonitorWindow) {
-      void openMonitorWindow();
-    } else {
-      void closeMonitorWindow();
-    }
-  }, [appState.settings.showMonitorWindow, isMonitorView]);
-
-  useEffect(() => {
     const wasVisible = lastTerminalVisibleRef.current;
     lastTerminalVisibleRef.current = showTerminalWorkspace;
     if (!wasVisible || showTerminalWorkspace) {
@@ -2287,22 +2140,6 @@ function AppLayout() {
   useEffect(() => {
     terminalGitWorktreesByProjectIdRef.current = terminalGitWorktreesByProjectId;
   }, [terminalGitWorktreesByProjectId]);
-
-  if (isMonitorView) {
-    return (
-      <>
-        <InteractionLockOverlay />
-        <div className="h-full bg-transparent">
-          <MonitorWindow
-            sessions={runningCodexSessionViews}
-            isLoading={codexMonitorStore.isLoading}
-            error={codexMonitorStore.error}
-            onOpenSession={handleMonitorOpenCodexSession}
-          />
-        </div>
-      </>
-    );
-  }
 
   return (
     <div className="relative h-full bg-background">
@@ -2396,6 +2233,7 @@ function AppLayout() {
             onAddProjectScript={addProjectScript}
             onUpdateProjectScript={updateProjectScript}
             onRemoveProjectScript={removeProjectScript}
+            sharedScriptsRoot={appState.settings.sharedScriptsRoot}
             getTagColor={getTagColor}
           />
         ) : null}

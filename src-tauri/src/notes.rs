@@ -48,12 +48,17 @@ fn extract_preview_line(content: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn read_optional_file(project_path: &str, file_name: &str, label: &str) -> Result<Option<String>, String> {
+fn read_optional_file(
+    project_path: &str,
+    file_name: &str,
+    label: &str,
+) -> Result<Option<String>, String> {
     let target_path = Path::new(project_path).join(file_name);
     if !target_path.exists() {
         return Ok(None);
     }
-    let content = fs::read_to_string(&target_path).map_err(|err| format!("读取{label}失败: {err}"))?;
+    let content =
+        fs::read_to_string(&target_path).map_err(|err| format!("读取{label}失败: {err}"))?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
         Ok(None)

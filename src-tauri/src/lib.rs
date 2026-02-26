@@ -7,6 +7,7 @@ mod markdown;
 mod models;
 mod notes;
 mod project_loader;
+mod shared_scripts;
 mod storage;
 mod system;
 mod terminal;
@@ -26,15 +27,16 @@ use crate::models::{
     AppStateFile, BranchListItem, CodexMonitorSnapshot, FsListResponse, FsReadResponse,
     FsWriteResponse, GitDailyResult, GitDiffContents, GitIdentity, GitRepoStatus,
     GitWorktreeAddResult, GitWorktreeListItem, HeatmapCacheFile, InteractionLockPayload,
-    MarkdownFileEntry, Project, ProjectNotesPreview, TerminalCodexPaneOverlay, TerminalWorkspace,
-    TerminalWorkspaceSummary, WorktreeInitCancelResult, WorktreeInitCreateBlockingResult,
-    WorktreeInitJobStatus, WorktreeInitRetryRequest, WorktreeInitStartRequest,
-    WorktreeInitStartResult, WorktreeInitStatusQuery, WorktreeInitStep,
+    MarkdownFileEntry, Project, ProjectNotesPreview, SharedScriptEntry, SharedScriptManifestScript,
+    TerminalCodexPaneOverlay, TerminalWorkspace, TerminalWorkspaceSummary,
+    WorktreeInitCancelResult, WorktreeInitCreateBlockingResult, WorktreeInitJobStatus,
+    WorktreeInitRetryRequest, WorktreeInitStartRequest, WorktreeInitStartResult,
+    WorktreeInitStatusQuery, WorktreeInitStep,
 };
 use crate::system::EditorOpenParams;
 use crate::terminal::{
-    TerminalState, terminal_create_session, terminal_get_codex_pane_overlay, terminal_kill,
-    terminal_resize, terminal_write,
+    terminal_create_session, terminal_get_codex_pane_overlay, terminal_kill, terminal_resize,
+    terminal_write, TerminalState,
 };
 
 const INTERACTION_LOCK_REASON_WORKTREE_CREATE: &str = "worktree-create";
@@ -461,24 +463,51 @@ fn open_in_editor(params: EditorOpenParams) -> Result<(), String> {
 }
 
 #[tauri::command]
-/// 设置指定窗口可在 macOS 全屏空间中作为辅助窗口展示。
-fn set_window_fullscreen_auxiliary(
+/// 列出全局共享脚本（优先读取 manifest，否则回退目录扫描）。
+fn list_shared_scripts(
     app: AppHandle,
-    window_label: String,
-    enabled: bool,
+    root: Option<String>,
+) -> Result<Vec<SharedScriptEntry>, String> {
+    log_command_result("list_shared_scripts", || {
+        shared_scripts::list_shared_scripts(&app, root.as_deref())
+    })
+}
+
+#[tauri::command]
+/// 保存全局共享脚本清单（manifest.json）。
+fn save_shared_scripts_manifest(
+    app: AppHandle,
+    root: Option<String>,
+    scripts: Vec<SharedScriptManifestScript>,
 ) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let window = app
-            .get_webview_window(&window_label)
-            .ok_or_else(|| "窗口不存在".to_string())?;
-        return apply_fullscreen_auxiliary(&window, enabled);
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, window_label, enabled);
-        Ok(())
-    }
+    log_command_result("save_shared_scripts_manifest", || {
+        shared_scripts::save_shared_scripts_manifest(&app, root.as_deref(), &scripts)
+    })
+}
+
+#[tauri::command]
+/// 读取全局共享脚本文件内容。
+fn read_shared_script_file(
+    app: AppHandle,
+    root: Option<String>,
+    relative_path: String,
+) -> Result<String, String> {
+    log_command_result("read_shared_script_file", || {
+        shared_scripts::read_shared_script_file(&app, root.as_deref(), &relative_path)
+    })
+}
+
+#[tauri::command]
+/// 写入全局共享脚本文件内容。
+fn write_shared_script_file(
+    app: AppHandle,
+    root: Option<String>,
+    relative_path: String,
+    content: String,
+) -> Result<(), String> {
+    log_command_result("write_shared_script_file", || {
+        shared_scripts::write_shared_script_file(&app, root.as_deref(), &relative_path, &content)
+    })
 }
 
 #[tauri::command]
@@ -756,7 +785,10 @@ pub fn run() {
             worktree_init_status,
             open_in_finder,
             open_in_editor,
-            set_window_fullscreen_auxiliary,
+            list_shared_scripts,
+            save_shared_scripts_manifest,
+            read_shared_script_file,
+            write_shared_script_file,
             copy_to_clipboard,
             read_project_notes,
             read_project_notes_previews,
@@ -795,96 +827,6 @@ pub fn run() {
             }
         }
     });
-}
-
-#[cfg(target_os = "macos")]
-fn apply_fullscreen_auxiliary(window: &tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
-    use objc2::runtime::AnyObject;
-    use objc2_app_kit::{
-        NSNormalWindowLevel, NSPanel, NSScreenSaverWindowLevel, NSWindow,
-        NSWindowCollectionBehavior, NSWindowStyleMask,
-    };
-
-    let ns_window = window.ns_window().map_err(|error| error.to_string())?;
-    if ns_window.is_null() {
-        return Err("获取 NSWindow 失败".to_string());
-    }
-
-    unsafe {
-        let ns_window = &*(ns_window as *mut NSWindow);
-        let ns_window_obj = &*(ns_window as *const NSWindow as *const AnyObject);
-        let mut behavior = ns_window.collectionBehavior();
-        if enabled {
-            if let Err(error) = try_set_window_class(ns_window_obj, "NSPanel") {
-                log::warn!("升级为 NSPanel 失败: {}", error);
-            }
-            if ns_window_obj.class().name().to_bytes() == b"NSPanel" {
-                let panel = &*(ns_window as *const NSWindow as *const NSPanel);
-                panel.setFloatingPanel(true);
-                panel.setBecomesKeyOnlyIfNeeded(true);
-                panel.setWorksWhenModal(true);
-            }
-            let mut style = ns_window.styleMask();
-            style |= NSWindowStyleMask::NonactivatingPanel;
-            style |= NSWindowStyleMask::UtilityWindow;
-            ns_window.setStyleMask(style);
-            behavior |= NSWindowCollectionBehavior::Auxiliary;
-            behavior |= NSWindowCollectionBehavior::CanJoinAllSpaces;
-            behavior |= NSWindowCollectionBehavior::CanJoinAllApplications;
-            behavior |= NSWindowCollectionBehavior::FullScreenAuxiliary;
-            ns_window.setHidesOnDeactivate(false);
-            ns_window.setLevel(NSScreenSaverWindowLevel);
-            ns_window.orderFrontRegardless();
-        } else {
-            let mut style = ns_window.styleMask();
-            style &= !NSWindowStyleMask::NonactivatingPanel;
-            style &= !NSWindowStyleMask::UtilityWindow;
-            ns_window.setStyleMask(style);
-            behavior &= !NSWindowCollectionBehavior::FullScreenAuxiliary;
-            behavior &= !NSWindowCollectionBehavior::CanJoinAllApplications;
-            behavior &= !NSWindowCollectionBehavior::Auxiliary;
-            ns_window.setLevel(NSNormalWindowLevel);
-            if let Err(error) = try_set_window_class(ns_window_obj, "NSWindow") {
-                log::warn!("还原 NSWindow 失败: {}", error);
-            }
-        }
-        ns_window.setCollectionBehavior(behavior);
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn try_set_window_class(
-    target: &objc2::runtime::AnyObject,
-    class_name: &str,
-) -> Result<(), String> {
-    use std::ffi::CStr;
-
-    let class_cstr = match class_name {
-        "NSPanel" => CStr::from_bytes_with_nul(b"NSPanel\0").map_err(|_| "类名非法".to_string())?,
-        "NSWindow" => {
-            CStr::from_bytes_with_nul(b"NSWindow\0").map_err(|_| "类名非法".to_string())?
-        }
-        _ => return Err("不支持的类名".to_string()),
-    };
-    let target_class =
-        objc2::runtime::AnyClass::get(class_cstr).ok_or_else(|| "无法获取目标类".to_string())?;
-    let current_class = target.class();
-    if current_class.name() == target_class.name() {
-        return Ok(());
-    }
-    if current_class.instance_size() != target_class.instance_size() {
-        return Err(format!(
-            "类大小不匹配: {} -> {}",
-            current_class.instance_size(),
-            target_class.instance_size()
-        ));
-    }
-    unsafe {
-        objc2::runtime::AnyObject::set_class(target, target_class);
-    }
-    Ok(())
 }
 
 fn log_command<T, F: FnOnce() -> T>(name: &str, action: F) -> T {

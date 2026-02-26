@@ -1,6 +1,6 @@
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
 };
 
 use tauri::{AppHandle, Emitter};

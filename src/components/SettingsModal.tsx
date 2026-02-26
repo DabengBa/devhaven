@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
+import { homeDir } from "@tauri-apps/api/path";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import type { AppSettings, GitIdentity } from "../models/types";
+import { openInFinder } from "../services/system";
 import { checkForUpdates } from "../services/update";
 import {
   TERMINAL_THEME_PRESETS,
@@ -11,6 +13,7 @@ import {
 } from "../themes/terminalThemes";
 import { normalizeGitIdentities } from "../utils/gitIdentity";
 import { IconX } from "./Icons";
+import SharedScriptsManagerModal from "./SharedScriptsManagerModal";
 
 type UpdateState =
   | { status: "idle" }
@@ -18,6 +21,26 @@ type UpdateState =
   | { status: "latest"; currentVersion: string; latestVersion: string; url?: string }
   | { status: "update"; currentVersion: string; latestVersion: string; url?: string }
   | { status: "error"; message: string; currentVersion?: string };
+
+const DEFAULT_SHARED_SCRIPTS_ROOT = "~/.devhaven/scripts";
+const BUTTON_FOCUS_RING_CLASS =
+  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2";
+const INPUT_CLASS =
+  "w-full rounded-md border border-border bg-card-bg px-3 py-2 text-text focus:outline-2 focus:outline-accent focus:outline-offset-[-1px]";
+
+type SettingsCategoryId = "general" | "terminal" | "workflow";
+
+type SettingsCategory = {
+  id: SettingsCategoryId;
+  label: string;
+  description: string;
+};
+
+const SETTINGS_CATEGORIES: SettingsCategory[] = [
+  { id: "general", label: "常规", description: "应用更新与版本信息。" },
+  { id: "terminal", label: "终端", description: "终端渲染与主题显示设置。" },
+  { id: "workflow", label: "协作", description: "通用脚本与 Git 身份。" },
+];
 
 const isSameIdentities = (left: GitIdentity[], right: GitIdentity[]) => {
   if (left.length !== right.length) {
@@ -42,14 +65,13 @@ export type SettingsModalProps = {
   onSaveSettings: (settings: AppSettings) => Promise<void>;
 };
 
-/** 设置弹窗，提供更新检查与 Git 身份配置。 */
+/** 设置弹窗，左侧分类、右侧内容，统一承载应用设置项。 */
 export default function SettingsModal({
   settings,
   onClose,
   onSaveSettings,
 }: SettingsModalProps) {
   const [gitIdentities, setGitIdentities] = useState<GitIdentity[]>(settings.gitIdentities);
-  const [showMonitorWindow, setShowMonitorWindow] = useState(settings.showMonitorWindow);
   const [terminalUseWebglRenderer, setTerminalUseWebglRenderer] = useState(
     settings.terminalUseWebglRenderer,
   );
@@ -59,9 +81,20 @@ export default function SettingsModal({
   );
   const [terminalLightTheme, setTerminalLightTheme] = useState("iTerm2 Solarized Light");
   const [terminalDarkTheme, setTerminalDarkTheme] = useState("iTerm2 Solarized Dark");
+  const [sharedScriptsRoot, setSharedScriptsRoot] = useState(
+    settings.sharedScriptsRoot || DEFAULT_SHARED_SCRIPTS_ROOT,
+  );
   const [versionLabel, setVersionLabel] = useState("");
   const [updateState, setUpdateState] = useState<UpdateState>({ status: "idle" });
   const [isSaving, setIsSaving] = useState(false);
+  const [activeCategoryId, setActiveCategoryId] = useState<SettingsCategoryId>("general");
+  const [showSharedScriptsManager, setShowSharedScriptsManager] = useState(false);
+
+  const dialogTitleId = useId();
+  const sharedScriptsRootInputId = useId();
+  const terminalSingleThemeSelectId = useId();
+  const terminalLightThemeSelectId = useId();
+  const terminalDarkThemeSelectId = useId();
 
   const normalizedGitIdentities = useMemo(() => normalizeGitIdentities(gitIdentities), [gitIdentities]);
   const terminalThemeSetting = useMemo(() => {
@@ -77,27 +110,33 @@ export default function SettingsModal({
   const nextSettings = useMemo<AppSettings>(
     () => ({
       ...settings,
-      showMonitorWindow,
       terminalUseWebglRenderer,
       terminalTheme: terminalThemeSetting,
       gitIdentities: normalizedGitIdentities,
+      sharedScriptsRoot: sharedScriptsRoot.trim() || DEFAULT_SHARED_SCRIPTS_ROOT,
     }),
-    [normalizedGitIdentities, settings, showMonitorWindow, terminalThemeSetting, terminalUseWebglRenderer],
+    [
+      normalizedGitIdentities,
+      settings,
+      sharedScriptsRoot,
+      terminalThemeSetting,
+      terminalUseWebglRenderer,
+    ],
   );
   const isDirty = useMemo(() => {
     const normalizedStoredIdentities = normalizeGitIdentities(settings.gitIdentities);
     return !(
       isSameIdentities(nextSettings.gitIdentities, normalizedStoredIdentities) &&
-      nextSettings.showMonitorWindow === settings.showMonitorWindow &&
       nextSettings.terminalUseWebglRenderer === settings.terminalUseWebglRenderer &&
       canonicalizeTerminalThemeSetting(nextSettings.terminalTheme) ===
-        canonicalizeTerminalThemeSetting(settings.terminalTheme)
+        canonicalizeTerminalThemeSetting(settings.terminalTheme) &&
+      nextSettings.sharedScriptsRoot ===
+        (settings.sharedScriptsRoot?.trim() || DEFAULT_SHARED_SCRIPTS_ROOT)
     );
   }, [nextSettings, settings]);
 
   useEffect(() => {
     setGitIdentities(settings.gitIdentities);
-    setShowMonitorWindow(settings.showMonitorWindow);
     setTerminalUseWebglRenderer(settings.terminalUseWebglRenderer);
     const parsedTerminalTheme = parseTerminalThemeSetting(settings.terminalTheme);
     if (parsedTerminalTheme.kind === "system") {
@@ -108,9 +147,10 @@ export default function SettingsModal({
       setTerminalFollowSystem(false);
       setTerminalSingleTheme(getTerminalThemePresetByName(parsedTerminalTheme.name).name);
     }
+    setSharedScriptsRoot(settings.sharedScriptsRoot || DEFAULT_SHARED_SCRIPTS_ROOT);
   }, [
     settings.gitIdentities,
-    settings.showMonitorWindow,
+    settings.sharedScriptsRoot,
     settings.terminalUseWebglRenderer,
     settings.terminalTheme,
   ]);
@@ -129,10 +169,6 @@ export default function SettingsModal({
 
   const handleRemoveGitIdentity = (index: number) => {
     setGitIdentities((prev) => prev.filter((_, currentIndex) => currentIndex !== index));
-  };
-
-  const handleToggleMonitorWindow = (enabled: boolean) => {
-    setShowMonitorWindow(enabled);
   };
 
   const handleToggleTerminalWebgl = (enabled: boolean) => {
@@ -217,168 +253,419 @@ export default function SettingsModal({
     }
   };
 
+  const handleOpenSharedScriptsRoot = async () => {
+    const normalizedPath = sharedScriptsRoot.trim() || DEFAULT_SHARED_SCRIPTS_ROOT;
+    try {
+      const resolvedPath = await resolveHomePath(normalizedPath);
+      await openInFinder(resolvedPath);
+    } catch (error) {
+      console.error("打开通用脚本目录失败。", error);
+    }
+  };
+
+  const activeCategory =
+    SETTINGS_CATEGORIES.find((category) => category.id === activeCategoryId) || SETTINGS_CATEGORIES[0];
+
+  const renderCategoryContent = () => {
+    if (activeCategoryId === "general") {
+      return (
+        <div className="flex flex-col gap-3">
+          <SettingsSectionCard
+            title="更新与版本"
+            description="检查新版本并快速跳转到发布页。"
+          >
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="rounded-full border border-border bg-button-bg px-2.5 py-1 text-fs-caption text-text">
+                当前版本：{versionLabel || "--"}
+              </div>
+              <button
+                className={`btn btn-outline min-h-[40px] ${BUTTON_FOCUS_RING_CLASS}`}
+                onClick={() => void handleCheckUpdate()}
+              >
+                {updateState.status === "checking" ? "检查中..." : "检查更新"}
+              </button>
+              {updateState.status === "update" || updateState.status === "latest" ? (
+                <button
+                  className={`btn min-h-[40px] ${BUTTON_FOCUS_RING_CLASS}`}
+                  onClick={() => void handleOpenRelease()}
+                  disabled={!updateState.url}
+                >
+                  查看发布
+                </button>
+              ) : null}
+            </div>
+            <UpdateStatusLine state={updateState} />
+          </SettingsSectionCard>
+        </div>
+      );
+    }
+
+    if (activeCategoryId === "terminal") {
+      return (
+        <div className="flex flex-col gap-3">
+          <SettingsSectionCard
+            title="渲染性能"
+            description="根据设备能力选择终端渲染策略。"
+          >
+            <SettingsToggleRow
+              title="启用 WebGL 渲染"
+              description="通常可提升终端滚动和高频输出场景性能。"
+              checked={terminalUseWebglRenderer}
+              onChange={handleToggleTerminalWebgl}
+            />
+          </SettingsSectionCard>
+
+          <SettingsSectionCard
+            title="主题"
+            description="支持固定主题或跟随系统浅/深色。"
+          >
+            <div className="flex flex-col gap-3">
+              <SettingsToggleRow
+                title="跟随系统浅/深色"
+                description="开启后可分别设置浅色与深色主题。"
+                checked={terminalFollowSystem}
+                onChange={handleToggleTerminalFollowSystem}
+              />
+
+              {terminalFollowSystem ? (
+                <div className="grid gap-2 md:grid-cols-2">
+                  <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text" htmlFor={terminalLightThemeSelectId}>
+                    <span>浅色主题</span>
+                    <select
+                      id={terminalLightThemeSelectId}
+                      className={INPUT_CLASS}
+                      value={terminalLightTheme}
+                      onChange={(event) => setTerminalLightTheme(event.target.value)}
+                    >
+                      {terminalThemeOptions.map((name) => (
+                        <option key={`terminal-theme-light-${name}`} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text" htmlFor={terminalDarkThemeSelectId}>
+                    <span>深色主题</span>
+                    <select
+                      id={terminalDarkThemeSelectId}
+                      className={INPUT_CLASS}
+                      value={terminalDarkTheme}
+                      onChange={(event) => setTerminalDarkTheme(event.target.value)}
+                    >
+                      {terminalThemeOptions.map((name) => (
+                        <option key={`terminal-theme-dark-${name}`} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              ) : (
+                <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text" htmlFor={terminalSingleThemeSelectId}>
+                  <span>终端主题</span>
+                  <select
+                    id={terminalSingleThemeSelectId}
+                    className={INPUT_CLASS}
+                    value={terminalSingleTheme}
+                    onChange={(event) => setTerminalSingleTheme(event.target.value)}
+                  >
+                    {terminalThemeOptions.map((name) => (
+                      <option key={`terminal-theme-${name}`} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          </SettingsSectionCard>
+        </div>
+      );
+    }
+
+    if (activeCategoryId === "workflow") {
+      return (
+        <div className="flex flex-col gap-3">
+          <SettingsSectionCard
+            title="通用脚本"
+            description="管理共享脚本根目录与脚本清单。"
+          >
+            <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text" htmlFor={sharedScriptsRootInputId}>
+              <span>脚本目录</span>
+              <input
+                id={sharedScriptsRootInputId}
+                className={INPUT_CLASS}
+                value={sharedScriptsRoot}
+                onChange={(event) => setSharedScriptsRoot(event.target.value)}
+                placeholder={DEFAULT_SHARED_SCRIPTS_ROOT}
+              />
+            </label>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                className={`btn btn-outline min-h-[40px] ${BUTTON_FOCUS_RING_CLASS}`}
+                onClick={() => void handleOpenSharedScriptsRoot()}
+              >
+                打开目录
+              </button>
+              <button
+                className={`btn min-h-[40px] ${BUTTON_FOCUS_RING_CLASS}`}
+                onClick={() => setShowSharedScriptsManager(true)}
+              >
+                可视化管理
+              </button>
+            </div>
+
+            <div className="text-fs-caption text-secondary-text">
+              目录下可维护 manifest.json 与通用脚本，供项目快捷命令复用。
+            </div>
+          </SettingsSectionCard>
+
+          <SettingsSectionCard
+            title="Git 身份"
+            description="维护常用提交身份，保存时自动清理空行。"
+          >
+            <div className="flex flex-col gap-2">
+              {gitIdentities.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-border bg-secondary-background px-3 py-3 text-fs-caption text-secondary-text">
+                  暂无 Git 身份，点击下方“添加身份”创建。
+                </div>
+              ) : null}
+
+              {gitIdentities.map((identity, index) => {
+                const nameInputId = `settings-git-identity-name-${index}`;
+                const emailInputId = `settings-git-identity-email-${index}`;
+                return (
+                  <div
+                    key={`git-identity-${index}`}
+                    className="rounded-lg border border-border bg-secondary-background px-3 py-3"
+                  >
+                    <div className="mb-2 text-fs-caption text-secondary-text">身份 {index + 1}</div>
+                    <div className="grid gap-2 md:grid-cols-[minmax(140px,1fr)_minmax(220px,1fr)_auto] md:items-end">
+                      <label className="flex flex-col gap-1 text-[13px] text-secondary-text" htmlFor={nameInputId}>
+                        <span>用户名</span>
+                        <input
+                          id={nameInputId}
+                          className={INPUT_CLASS}
+                          value={identity.name}
+                          onChange={(event) => handleUpdateGitIdentity(index, "name", event.target.value)}
+                          placeholder="用户名"
+                        />
+                      </label>
+
+                      <label className="flex flex-col gap-1 text-[13px] text-secondary-text" htmlFor={emailInputId}>
+                        <span>邮箱</span>
+                        <input
+                          id={emailInputId}
+                          type="email"
+                          className={INPUT_CLASS}
+                          value={identity.email}
+                          onChange={(event) => handleUpdateGitIdentity(index, "email", event.target.value)}
+                          placeholder="邮箱"
+                        />
+                      </label>
+
+                      <button
+                        className={`btn btn-outline min-h-[40px] whitespace-nowrap ${BUTTON_FOCUS_RING_CLASS}`}
+                        onClick={() => handleRemoveGitIdentity(index)}
+                      >
+                        移除
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-end">
+              <button
+                className={`btn btn-outline min-h-[40px] ${BUTTON_FOCUS_RING_CLASS}`}
+                onClick={handleAddGitIdentity}
+              >
+                添加身份
+              </button>
+            </div>
+          </SettingsSectionCard>
+        </div>
+      );
+    }
+
+    return null;
+  };
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal>
-      <div className="modal-panel min-w-[600px] w-[min(760px,92vw)] max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <div className="text-[16px] font-semibold">设置</div>
-            <div className="text-fs-caption text-secondary-text">关闭窗口将自动保存</div>
-          </div>
-          <button className="icon-btn" onClick={() => void handleClose()} aria-label="关闭" disabled={isSaving}>
-            <IconX size={14} />
-          </button>
-        </div>
-
-        <section className="flex flex-col gap-3 rounded-xl border border-border bg-card-bg p-3">
-          <div className="text-[13px] font-semibold">更新与版本</div>
-          <div className="flex flex-wrap items-center gap-2.5">
-            <div className="rounded-full bg-button-bg px-2.5 py-1 text-fs-caption">当前版本：{versionLabel || "--"}</div>
-            <button className="btn btn-outline" onClick={() => void handleCheckUpdate()}>
-              {updateState.status === "checking" ? "检查中..." : "检查更新"}
-            </button>
-            {updateState.status === "update" || updateState.status === "latest" ? (
-              <button className="btn" onClick={() => void handleOpenRelease()} disabled={!updateState.url}>
-                查看发布
-              </button>
-            ) : null}
-          </div>
-          <UpdateStatusLine state={updateState} />
-        </section>
-
-        <section className="flex flex-col gap-3 rounded-xl border border-border bg-card-bg p-3">
-          <div className="text-[13px] font-semibold">悬浮窗</div>
-          <label className="flex items-center gap-2 text-text">
-            <input
-              className="h-3.5 w-3.5"
-              type="checkbox"
-              checked={showMonitorWindow}
-              onChange={(event) => handleToggleMonitorWindow(event.target.checked)}
-            />
-            <span>显示 CLI 悬浮监控窗（只读）</span>
-          </label>
-        </section>
-
-        <section className="flex flex-col gap-3 rounded-xl border border-border bg-card-bg p-3">
-          <div className="text-[13px] font-semibold">终端</div>
-          <label className="flex items-center gap-2 text-text">
-            <input
-              className="h-3.5 w-3.5"
-              type="checkbox"
-              checked={terminalUseWebglRenderer}
-              onChange={(event) => handleToggleTerminalWebgl(event.target.checked)}
-            />
-            <span>启用 WebGL 渲染（提升性能）</span>
-          </label>
-
-          <div className="h-px bg-divider" />
-
-          <div className="text-[12px] font-semibold text-text">主题</div>
-          <label className="flex items-center gap-2 text-text">
-            <input
-              className="h-3.5 w-3.5"
-              type="checkbox"
-              checked={terminalFollowSystem}
-              onChange={(event) => handleToggleTerminalFollowSystem(event.target.checked)}
-            />
-            <span>跟随系统浅/深色</span>
-          </label>
-
-          {terminalFollowSystem ? (
-            <div className="grid grid-cols-[64px_minmax(0,1fr)] items-center gap-2">
-              <div className="text-fs-caption text-secondary-text">浅色</div>
-              <select
-                className="rounded-md border border-border bg-card-bg px-2 py-2 text-text focus:outline-2 focus:outline-accent focus:outline-offset-[-1px]"
-                value={terminalLightTheme}
-                onChange={(event) => setTerminalLightTheme(event.target.value)}
-              >
-                {terminalThemeOptions.map((name) => (
-                  <option key={`terminal-theme-light-${name}`} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-              <div className="text-fs-caption text-secondary-text">深色</div>
-              <select
-                className="rounded-md border border-border bg-card-bg px-2 py-2 text-text focus:outline-2 focus:outline-accent focus:outline-offset-[-1px]"
-                value={terminalDarkTheme}
-                onChange={(event) => setTerminalDarkTheme(event.target.value)}
-              >
-                {terminalThemeOptions.map((name) => (
-                  <option key={`terminal-theme-dark-${name}`} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ) : (
-            <div className="grid grid-cols-[64px_minmax(0,1fr)] items-center gap-2">
-              <div className="text-fs-caption text-secondary-text">主题</div>
-              <select
-                className="rounded-md border border-border bg-card-bg px-2 py-2 text-text focus:outline-2 focus:outline-accent focus:outline-offset-[-1px]"
-                value={terminalSingleTheme}
-                onChange={(event) => setTerminalSingleTheme(event.target.value)}
-              >
-                {terminalThemeOptions.map((name) => (
-                  <option key={`terminal-theme-${name}`} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-        </section>
-
-        <section className="flex flex-col gap-3 rounded-xl border border-border bg-card-bg p-3">
-          <div className="mb-1 flex items-center justify-between gap-3">
-            <div className="text-[13px] font-semibold">Git 身份</div>
-            {isSaving && (
-              <div className="rounded-md bg-[rgba(69,59,231,0.1)] px-2 py-1 text-[11px] text-accent animate-pulse">
-                保存中...
+    <>
+      <div className="modal-overlay" role="presentation">
+        <div
+          className="modal-panel min-w-[320px] w-[min(980px,96vw)] h-[min(88vh,760px)] overflow-hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={dialogTitleId}
+        >
+          <header className="rounded-xl border border-border bg-card-bg px-4 py-3">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div id={dialogTitleId} className="text-[16px] font-semibold text-text">
+                  设置
+                </div>
+                <div className="mt-1 text-fs-caption text-secondary-text">
+                  统一管理应用更新、终端体验与协作配置。
+                </div>
               </div>
-            )}
-          </div>
-          <div className="flex flex-col gap-2">
-            {gitIdentities.map((identity, index) => (
-              <div
-                key={`git-identity-${index}`}
-                className="grid grid-cols-[minmax(140px,1fr)_minmax(180px,1fr)_auto] items-center gap-2"
-              >
-                <input
-                  className="rounded-md border border-border bg-card-bg px-2 py-2 text-text focus:outline-2 focus:outline-accent focus:outline-offset-[-1px]"
-                  value={identity.name}
-                  onChange={(event) => handleUpdateGitIdentity(index, "name", event.target.value)}
-                  placeholder="用户名"
-                  aria-label={`Git 用户名 ${index + 1}`}
-                />
-                <input
-                  type="email"
-                  className="rounded-md border border-border bg-card-bg px-2 py-2 text-text focus:outline-2 focus:outline-accent focus:outline-offset-[-1px]"
-                  value={identity.email}
-                  onChange={(event) => handleUpdateGitIdentity(index, "email", event.target.value)}
-                  placeholder="邮箱"
-                  aria-label={`Git 邮箱 ${index + 1}`}
-                />
-                <button
-                  className="btn btn-outline whitespace-nowrap"
-                  onClick={() => handleRemoveGitIdentity(index)}
+
+              <div className="flex items-center gap-2">
+                <div
+                  className={[
+                    "rounded-full border px-2 py-1 text-fs-caption",
+                    isDirty
+                      ? "border-accent bg-[rgba(69,59,231,0.15)] text-accent"
+                      : "border-border bg-button-bg text-secondary-text",
+                  ].join(" ")}
                 >
-                  移除
+                  {isDirty ? "有未保存变更" : "已同步"}
+                </div>
+
+                <button
+                  className={`icon-btn min-h-[40px] min-w-[40px] ${BUTTON_FOCUS_RING_CLASS}`}
+                  onClick={() => void handleClose()}
+                  aria-label="关闭设置"
+                  disabled={isSaving}
+                >
+                  <IconX size={14} />
                 </button>
               </div>
-            ))}
-          </div>
-          <div className="flex items-center justify-end gap-2">
-            <button className="btn btn-outline" onClick={handleAddGitIdentity}>
-              添加身份
-            </button>
-          </div>
-        </section>
+            </div>
+          </header>
 
+          <div className="mt-3 grid min-h-0 flex-1 gap-3 md:grid-cols-[260px_minmax(0,1fr)]">
+            <aside className="rounded-xl border border-border bg-card-bg p-2.5">
+              <div className="flex gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0">
+                {SETTINGS_CATEGORIES.map((category) => {
+                  const isActive = category.id === activeCategoryId;
+                  return (
+                    <button
+                      key={category.id}
+                      className={[
+                        "min-h-[44px] min-w-[148px] rounded-lg border px-3 py-2 text-left transition-colors",
+                        BUTTON_FOCUS_RING_CLASS,
+                        isActive
+                          ? "border-accent bg-[rgba(69,59,231,0.12)] text-text"
+                          : "border-border bg-secondary-background text-secondary-text hover:bg-button-bg hover:text-text",
+                      ].join(" ")}
+                      onClick={() => setActiveCategoryId(category.id)}
+                      aria-current={isActive ? "page" : undefined}
+                    >
+                      <div className="text-[13px] font-semibold">{category.label}</div>
+                      <div className="mt-0.5 text-fs-caption leading-5 opacity-90">{category.description}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </aside>
+
+            <section className="flex min-h-0 flex-col rounded-xl border border-border bg-card-bg p-4">
+              <div className="mb-3 border-b border-divider pb-3">
+                <div className="text-[14px] font-semibold text-text">{activeCategory.label}</div>
+                <div className="mt-1 text-fs-caption text-secondary-text">{activeCategory.description}</div>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto pr-1">{renderCategoryContent()}</div>
+            </section>
+          </div>
+
+          <footer className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-border bg-card-bg px-4 py-3">
+            <div className="text-fs-caption text-secondary-text">
+              {isSaving
+                ? "正在保存设置，请稍候..."
+                : isDirty
+                  ? "检测到变更，点击右侧按钮保存并关闭。"
+                  : "当前配置已同步，点击右侧按钮关闭。"}
+            </div>
+            <button
+              className={`btn btn-primary min-h-[40px] ${BUTTON_FOCUS_RING_CLASS}`}
+              onClick={() => void handleClose()}
+              disabled={isSaving}
+            >
+              {isSaving ? "保存中..." : isDirty ? "保存并关闭" : "关闭"}
+            </button>
+          </footer>
+        </div>
       </div>
+
+      {showSharedScriptsManager ? (
+        <SharedScriptsManagerModal
+          root={nextSettings.sharedScriptsRoot}
+          onClose={() => setShowSharedScriptsManager(false)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+type SettingsSectionCardProps = {
+  title: string;
+  description: string;
+  children: ReactNode;
+};
+
+function SettingsSectionCard({ title, description, children }: SettingsSectionCardProps) {
+  return (
+    <section className="rounded-xl border border-border bg-secondary-background p-3">
+      <div className="mb-2">
+        <div className="text-[13px] font-semibold text-text">{title}</div>
+        <div className="mt-1 text-fs-caption text-secondary-text">{description}</div>
+      </div>
+      <div className="flex flex-col gap-2.5">{children}</div>
+    </section>
+  );
+}
+
+type SettingsToggleRowProps = {
+  title: string;
+  description: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+};
+
+function SettingsToggleRow({ title, description, checked, onChange }: SettingsToggleRowProps) {
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-lg border border-border bg-card-bg px-3 py-2.5">
+      <div className="min-w-0">
+        <div className="text-[13px] font-medium text-text">{title}</div>
+        <div className="mt-1 text-fs-caption text-secondary-text">{description}</div>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={title}
+        className={[
+          "relative mt-0.5 h-7 w-12 shrink-0 rounded-full border transition-colors duration-200 motion-reduce:transition-none",
+          BUTTON_FOCUS_RING_CLASS,
+          checked ? "border-accent bg-[rgba(69,59,231,0.25)]" : "border-border bg-button-bg",
+        ].join(" ")}
+        onClick={() => onChange(!checked)}
+      >
+        <span
+          className={[
+            "absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition-transform duration-200 motion-reduce:transition-none",
+            checked ? "translate-x-5" : "translate-x-0",
+          ].join(" ")}
+        />
+      </button>
     </div>
   );
+}
+
+async function resolveHomePath(path: string): Promise<string> {
+  if (path === "~") {
+    return (await homeDir()).replace(/[\\/]+$/, "");
+  }
+  if (path.startsWith("~/") || path.startsWith("~\\")) {
+    const homePath = (await homeDir()).replace(/[\\/]+$/, "");
+    return `${homePath}/${path.slice(2)}`;
+  }
+  return path;
 }
 
 type UpdateStatusLineProps = {
@@ -390,17 +677,29 @@ function UpdateStatusLine({ state }: UpdateStatusLineProps) {
     return null;
   }
   if (state.status === "checking") {
-    return <div className="text-fs-caption text-secondary-text">检查中...</div>;
+    return (
+      <div className="text-fs-caption text-secondary-text" role="status" aria-live="polite">
+        检查中...
+      </div>
+    );
   }
   if (state.status === "error") {
-    return <div className="text-fs-caption text-error">检查失败：{state.message}</div>;
+    return (
+      <div className="text-fs-caption text-error" role="alert">
+        检查失败：{state.message}
+      </div>
+    );
   }
   if (state.status === "update") {
     return (
-      <div className="text-fs-caption text-warning">
+      <div className="text-fs-caption text-warning" role="status" aria-live="polite">
         发现新版本 {state.latestVersion}，当前 {state.currentVersion}
       </div>
     );
   }
-  return <div className="text-fs-caption text-success">已是最新版本 {state.latestVersion}</div>;
+  return (
+    <div className="text-fs-caption text-success" role="status" aria-live="polite">
+      已是最新版本 {state.latestVersion}
+    </div>
+  );
 }

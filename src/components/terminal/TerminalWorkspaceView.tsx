@@ -40,6 +40,7 @@ import {
   updateSplitRatios,
 } from "../../utils/terminalLayout";
 import { isInteractionLocked } from "../../utils/interactionLock";
+import { renderScriptTemplateCommand } from "../../utils/scriptTemplate";
 import { IconFolder, IconGitBranch, IconSidebarRight, IconX } from "../Icons";
 import ResizablePanel from "./ResizablePanel";
 import SplitLayout from "./SplitLayout";
@@ -138,7 +139,11 @@ function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-function wrapQuickCommandForShell(command: string, token: string) {
+function wrapQuickCommandForShell(
+  command: string,
+  token: string,
+  environment?: Record<string, string | undefined>,
+) {
   const normalized = command.replace(/\r\n|\n|\r/g, "; ").trim();
   const safeToken = token.replace(/[^a-zA-Z0-9-]/g, "");
   if (!normalized || !safeToken) {
@@ -154,7 +159,21 @@ function wrapQuickCommandForShell(command: string, token: string) {
     'eval "$DEVHAVEN_QC_CMD"; ' +
     'code=$?; dh_qc_emit_exit "$code"; exit "$code"';
 
+  const envAssignments: string[] = [];
+  for (const [rawKey, rawValue] of Object.entries(environment ?? {})) {
+    if (!rawValue) {
+      continue;
+    }
+    const key = rawKey.trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      continue;
+    }
+    envAssignments.push(`${key}=${shellQuote(rawValue)}`);
+  }
+  const envPrefix = envAssignments.length > 0 ? `${envAssignments.join(" ")} ` : "";
+
   return (
+    envPrefix +
     `DEVHAVEN_QC_TOKEN=${shellQuote(safeToken)} ` +
     `DEVHAVEN_QC_CMD=${shellQuote(normalized)} ` +
     `sh -lc ${shellQuote(runnerScript)}`
@@ -1112,6 +1131,11 @@ export default function TerminalWorkspaceView({
         showPanelMessage("启动命令为空");
         return;
       }
+      const rendered = renderScriptTemplateCommand(script);
+      if (!rendered.ok) {
+        showPanelMessage(rendered.error);
+        return;
+      }
       const current = workspaceRef.current;
       if (!current) {
         showPanelMessage("终端工作区尚未就绪");
@@ -1140,7 +1164,13 @@ export default function TerminalWorkspaceView({
       const sessionId = createId();
       const tabId = createId();
       scriptIdBySessionIdRef.current.set(sessionId, script.id);
-      pendingStartBySessionIdRef.current.set(sessionId, wrapQuickCommandForShell(script.start.trim(), sessionId));
+      pendingStartBySessionIdRef.current.set(
+        sessionId,
+        wrapQuickCommandForShell(rendered.command.trim(), sessionId, {
+          DEVHAVEN_SHARED_SCRIPTS: appState.settings.sharedScriptsRoot,
+          DEVHAVEN_PROJECT_PATH: current.projectPath || projectPath,
+        }),
+      );
 
       setScriptRuntimeById((prev) => ({
         ...prev,
@@ -1163,7 +1193,14 @@ export default function TerminalWorkspaceView({
         };
       });
     },
-    [cleanupRuntimeBySessionIds, isScriptRuntimeValid, showPanelMessage, updateWorkspace],
+    [
+      appState.settings.sharedScriptsRoot,
+      cleanupRuntimeBySessionIds,
+      isScriptRuntimeValid,
+      projectPath,
+      showPanelMessage,
+      updateWorkspace,
+    ],
   );
 
   const stopQuickCommand = useCallback(

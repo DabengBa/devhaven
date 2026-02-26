@@ -23,6 +23,36 @@ export type ProjectScript = {
   name: string;
   start: string;
   stop?: string | null;
+  paramSchema?: ScriptParamField[];
+  templateParams?: Record<string, string>;
+};
+
+export type ScriptParamFieldType = "text" | "number" | "secret";
+
+export type ScriptParamField = {
+  key: string;
+  label: string;
+  type: ScriptParamFieldType;
+  required: boolean;
+  defaultValue?: string;
+  description?: string;
+};
+
+export type SharedScriptEntry = {
+  id: string;
+  name: string;
+  absolutePath: string;
+  relativePath: string;
+  commandTemplate: string;
+  params: ScriptParamField[];
+};
+
+export type SharedScriptManifestScript = {
+  id: string;
+  name: string;
+  path: string;
+  commandTemplate: string;
+  params: ScriptParamField[];
 };
 
 export type ProjectWorktree = {
@@ -62,9 +92,9 @@ export type AppSettings = {
   terminalOpenTool: OpenToolSettings;
   terminalUseWebglRenderer: boolean;
   terminalTheme: string;
-  showMonitorWindow: boolean;
   gitIdentities: GitIdentity[];
   projectListViewMode: ProjectListViewMode;
+  sharedScriptsRoot: string;
 };
 
 export type AppStateFile = {

@@ -12,6 +12,9 @@ import {
 } from "../services/appStorage";
 import { collectGitDaily } from "../services/gitDaily";
 import { pickColorForTag } from "../utils/tagColors";
+import { buildTemplateParams, mergeScriptParamSchema } from "../utils/scriptTemplate";
+
+const DEFAULT_SHARED_SCRIPTS_ROOT = "~/.devhaven/scripts";
 
 const emptyState: AppStateFile = {
   version: 4,
@@ -30,19 +33,21 @@ const emptyState: AppStateFile = {
     },
     terminalUseWebglRenderer: true,
     terminalTheme: "DevHaven Dark",
-    showMonitorWindow: false,
     gitIdentities: [],
     projectListViewMode: "card",
+    sharedScriptsRoot: DEFAULT_SHARED_SCRIPTS_ROOT,
   },
 };
 
 function normalizeAppState(state: AppStateFile): AppStateFile {
   const directories = normalizePathList(state.directories);
+  const settings = normalizeSettings(state.settings);
   return {
     ...state,
     directories,
     recycleBin: normalizePathList(state.recycleBin),
     favoriteProjectPaths: normalizePathList(state.favoriteProjectPaths),
+    settings,
   };
 }
 
@@ -60,7 +65,13 @@ export type DevHavenActions = {
   updateGitDaily: (paths?: string[]) => Promise<void>;
   addProjectScript: (
     projectId: string,
-    script: { name: string; start: string; stop?: string | null },
+    script: {
+      name: string;
+      start: string;
+      stop?: string | null;
+      paramSchema?: ProjectScript["paramSchema"];
+      templateParams?: ProjectScript["templateParams"];
+    },
   ) => Promise<void>;
   updateProjectScript: (projectId: string, script: ProjectScript) => Promise<void>;
   removeProjectScript: (projectId: string, scriptId: string) => Promise<void>;
@@ -268,7 +279,16 @@ export function useDevHaven(): DevHavenStore {
 
   /** 为项目新增快捷命令并持久化。 */
   const addProjectScript = useCallback(
-    async (projectId: string, script: { name: string; start: string; stop?: string | null }) => {
+    async (
+      projectId: string,
+      script: {
+        name: string;
+        start: string;
+        stop?: string | null;
+        paramSchema?: ProjectScript["paramSchema"];
+        templateParams?: ProjectScript["templateParams"];
+      },
+    ) => {
       const name = script.name.trim();
       const start = script.start.trim();
       const stop = (script.stop ?? "").trim();
@@ -276,11 +296,16 @@ export function useDevHaven(): DevHavenStore {
         return;
       }
 
-      const nextScript: ProjectScript = {
+      const normalizedScript = normalizeProjectScript({
         id: createScriptId(),
         name,
         start,
         stop: stop ? stop : null,
+        paramSchema: script.paramSchema,
+        templateParams: script.templateParams,
+      });
+      const nextScript: ProjectScript = {
+        ...normalizedScript,
       };
       const nextProjects = projects.map((project) =>
         project.id === projectId ? { ...project, scripts: [...(project.scripts ?? []), nextScript] } : project,
@@ -300,12 +325,12 @@ export function useDevHaven(): DevHavenStore {
         return;
       }
 
-      const nextScript: ProjectScript = {
+      const nextScript = normalizeProjectScript({
         ...script,
         name,
         start,
         stop: stop ? stop : null,
-      };
+      });
 
       const nextProjects = projects.map((project) => {
         if (project.id !== projectId) {
@@ -535,7 +560,7 @@ export function useDevHaven(): DevHavenStore {
   /** 更新应用设置并持久化。 */
   const updateSettings = useCallback(
     async (settings: AppStateFile["settings"]) => {
-      const nextState = { ...appState, settings };
+      const nextState = { ...appState, settings: normalizeSettings(settings) };
       await commitAppState(nextState);
     },
     [appState, commitAppState],
@@ -812,8 +837,32 @@ function isSameWorktree(left: ProjectWorktree, right: ProjectWorktree): boolean 
 function normalizeProject(project: Project): Project {
   return {
     ...project,
-    scripts: project.scripts ?? [],
+    scripts: (project.scripts ?? []).map(normalizeProjectScript),
     worktrees: project.worktrees ?? [],
+  };
+}
+
+function normalizeSettings(settings: AppStateFile["settings"] | null | undefined): AppStateFile["settings"] {
+  const sharedScriptsRoot = settings?.sharedScriptsRoot?.trim();
+  return {
+    editorOpenTool: settings?.editorOpenTool ?? emptyState.settings.editorOpenTool,
+    terminalOpenTool: settings?.terminalOpenTool ?? emptyState.settings.terminalOpenTool,
+    terminalUseWebglRenderer:
+      settings?.terminalUseWebglRenderer ?? emptyState.settings.terminalUseWebglRenderer,
+    terminalTheme: settings?.terminalTheme ?? emptyState.settings.terminalTheme,
+    gitIdentities: settings?.gitIdentities ?? emptyState.settings.gitIdentities,
+    projectListViewMode: settings?.projectListViewMode ?? emptyState.settings.projectListViewMode,
+    sharedScriptsRoot: sharedScriptsRoot || DEFAULT_SHARED_SCRIPTS_ROOT,
+  };
+}
+
+function normalizeProjectScript(script: ProjectScript): ProjectScript {
+  const paramSchema = mergeScriptParamSchema(script.start ?? "", script.paramSchema, script.templateParams);
+  const templateParams = buildTemplateParams(paramSchema, script.templateParams);
+  return {
+    ...script,
+    paramSchema,
+    templateParams,
   };
 }
 

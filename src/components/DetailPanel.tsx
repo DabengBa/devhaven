@@ -1,12 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 
-import type { Project, ProjectScript, TagData } from "../models/types";
+import type { Project, ProjectScript, ScriptParamField, SharedScriptEntry, TagData } from "../models/types";
 import type { BranchListItem } from "../models/branch";
 import { swiftDateToJsDate } from "../models/types";
 import { readProjectMarkdownFile } from "../services/markdown";
 import { readProjectNotes, readProjectTodo, writeProjectNotes, writeProjectTodo } from "../services/notes";
+import { listSharedScripts } from "../services/sharedScripts";
 import { listBranches } from "../services/git";
+import {
+  applySharedScriptCommandTemplate,
+  buildTemplateParams,
+  mergeScriptParamSchema,
+  renderScriptTemplateCommand,
+} from "../utils/scriptTemplate";
 import { formatPathWithTilde } from "../utils/pathDisplay";
 import { IconX } from "./Icons";
 import ProjectMarkdownSection from "./ProjectMarkdownSection";
@@ -21,10 +28,17 @@ export type DetailPanelProps = {
   onStopProjectScript: (projectId: string, scriptId: string) => Promise<void>;
   onAddProjectScript: (
     projectId: string,
-    script: { name: string; start: string; stop?: string | null },
+    script: {
+      name: string;
+      start: string;
+      stop?: string | null;
+      paramSchema?: ProjectScript["paramSchema"];
+      templateParams?: ProjectScript["templateParams"];
+    },
   ) => Promise<void>;
   onUpdateProjectScript: (projectId: string, script: ProjectScript) => Promise<void>;
   onRemoveProjectScript: (projectId: string, scriptId: string) => Promise<void>;
+  sharedScriptsRoot: string;
   getTagColor: (tag: string) => string;
 };
 
@@ -33,6 +47,18 @@ type TodoItem = {
   id: string;
   text: string;
   done: boolean;
+};
+
+type ScriptDialogState = {
+  mode: "new" | "edit";
+  scriptId: string | null;
+  name: string;
+  start: string;
+  stop: string;
+  error: string;
+  selectedSharedScriptId: string;
+  paramSchema: ScriptParamField[];
+  templateParams: Record<string, string>;
 };
 
 /** 格式化 Swift 时间戳为中文时间。 */
@@ -56,6 +82,7 @@ export default function DetailPanel({
   onAddProjectScript,
   onUpdateProjectScript,
   onRemoveProjectScript,
+  sharedScriptsRoot,
   getTagColor,
 }: DetailPanelProps) {
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
@@ -74,17 +101,14 @@ export default function DetailPanel({
   const [fallbackReadmeLoading, setFallbackReadmeLoading] = useState(false);
   const [branches, setBranches] = useState<BranchListItem[]>([]);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
-  const [scriptDialog, setScriptDialog] = useState<{
-    mode: "new" | "edit";
-    scriptId: string | null;
-    name: string;
-    start: string;
-    stop: string;
-    error: string;
-  } | null>(null);
+  const [scriptDialog, setScriptDialog] = useState<ScriptDialogState | null>(null);
+  const [sharedScripts, setSharedScripts] = useState<SharedScriptEntry[]>([]);
+  const [sharedScriptsLoading, setSharedScriptsLoading] = useState(false);
+  const [sharedScriptsError, setSharedScriptsError] = useState<string | null>(null);
 
   const saveTimer = useRef<number | null>(null);
   const todoSaveTimer = useRef<number | null>(null);
+  const isScriptDialogOpen = Boolean(scriptDialog);
 
   const projectTags = useMemo(() => project?.tags ?? [], [project]);
   const availableTags = useMemo(
@@ -182,6 +206,39 @@ export default function DetailPanel({
   useEffect(() => {
     setScriptDialog(null);
   }, [project?.id]);
+
+  useEffect(() => {
+    if (!isScriptDialogOpen) {
+      return;
+    }
+    let cancelled = false;
+    setSharedScriptsLoading(true);
+    setSharedScriptsError(null);
+    void listSharedScripts(sharedScriptsRoot)
+      .then((entries) => {
+        if (cancelled) {
+          return;
+        }
+        setSharedScripts(entries);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setSharedScriptsError(error instanceof Error ? error.message : "加载通用脚本失败");
+        setSharedScripts([]);
+      })
+      .finally(() => {
+        if (cancelled) {
+          return;
+        }
+        setSharedScriptsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isScriptDialogOpen, sharedScriptsRoot]);
 
   useEffect(() => {
     if (!project) {
@@ -556,7 +613,17 @@ export default function DetailPanel({
               <button
                 className="btn"
                 onClick={() =>
-                  setScriptDialog({ mode: "new", scriptId: null, name: "", start: "", stop: "", error: "" })
+                  setScriptDialog(
+                    createScriptDialogState({
+                      mode: "new",
+                      scriptId: null,
+                      name: "",
+                      start: "",
+                      stop: "",
+                      paramSchema: [],
+                      templateParams: {},
+                    }),
+                  )
                 }
               >
                 新增
@@ -590,14 +657,17 @@ export default function DetailPanel({
                         <button
                           className="btn"
                           onClick={() =>
-                            setScriptDialog({
-                              mode: "edit",
-                              scriptId: script.id,
-                              name: script.name,
-                              start: script.start,
-                              stop: script.stop ?? "",
-                              error: "",
-                            })
+                            setScriptDialog(
+                              createScriptDialogState({
+                                mode: "edit",
+                                scriptId: script.id,
+                                name: script.name,
+                                start: script.start,
+                                stop: script.stop ?? "",
+                                paramSchema: script.paramSchema,
+                                templateParams: script.templateParams,
+                              }),
+                            )
                           }
                         >
                           编辑
@@ -654,6 +724,58 @@ export default function DetailPanel({
           <div className="modal-panel">
             <div className="text-[16px] font-semibold">{scriptDialog.mode === "new" ? "新增快捷命令" : "编辑快捷命令"}</div>
             <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text">
+              <span>插入通用脚本（可选）</span>
+              <select
+                className="rounded-md border border-border bg-card-bg px-2 py-2 text-text"
+                value={scriptDialog.selectedSharedScriptId}
+                onChange={(event) => {
+                  const selectedId = event.target.value;
+                  setScriptDialog((prev) => {
+                    if (!prev) {
+                      return prev;
+                    }
+                    if (!selectedId) {
+                      return { ...prev, selectedSharedScriptId: "", error: "" };
+                    }
+                    const selected = sharedScripts.find((item) => item.id === selectedId);
+                    if (!selected) {
+                      return {
+                        ...prev,
+                        selectedSharedScriptId: selectedId,
+                        error: "通用脚本不存在或已失效",
+                      };
+                    }
+                    const start = applySharedScriptCommandTemplate(
+                      selected.commandTemplate,
+                      selected.absolutePath,
+                    );
+                    const paramSchema = mergeScriptParamSchema(start, selected.params, prev.templateParams);
+                    const templateParams = buildTemplateParams(paramSchema, prev.templateParams);
+                    return {
+                      ...prev,
+                      selectedSharedScriptId: selected.id,
+                      name: prev.name.trim() ? prev.name : selected.name,
+                      start,
+                      paramSchema,
+                      templateParams,
+                      error: "",
+                    };
+                  });
+                }}
+              >
+                <option value="">手动输入命令</option>
+                {sharedScripts.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name} ({item.relativePath})
+                  </option>
+                ))}
+              </select>
+              {sharedScriptsLoading ? (
+                <div className="text-fs-caption text-secondary-text">正在加载通用脚本...</div>
+              ) : null}
+              {sharedScriptsError ? <div className="text-fs-caption text-error">{sharedScriptsError}</div> : null}
+            </label>
+            <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text">
               <span>名称</span>
               <input
                 className="rounded-md border border-border bg-card-bg px-2 py-2 text-text"
@@ -668,9 +790,27 @@ export default function DetailPanel({
               <textarea
                 className="min-h-[90px] resize-y rounded-md border border-border bg-card-bg px-2 py-2 text-text"
                 value={scriptDialog.start}
-                onChange={(event) =>
-                  setScriptDialog((prev) => (prev ? { ...prev, start: event.target.value, error: "" } : prev))
-                }
+                onChange={(event) => {
+                  const nextStart = event.target.value;
+                  setScriptDialog((prev) => {
+                    if (!prev) {
+                      return prev;
+                    }
+                    const paramSchema = mergeScriptParamSchema(
+                      nextStart,
+                      prev.paramSchema,
+                      prev.templateParams,
+                    );
+                    const templateParams = buildTemplateParams(paramSchema, prev.templateParams);
+                    return {
+                      ...prev,
+                      start: nextStart,
+                      paramSchema,
+                      templateParams,
+                      error: "",
+                    };
+                  });
+                }}
                 placeholder="例如：pnpm dev"
               />
             </label>
@@ -685,6 +825,44 @@ export default function DetailPanel({
                 placeholder="例如：pnpm stop"
               />
             </label>
+            {scriptDialog.paramSchema.length > 0 ? (
+              <section className="flex flex-col gap-2 rounded-md border border-border bg-secondary-background p-2.5">
+                <div className="text-[13px] font-semibold text-text">参数配置</div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {scriptDialog.paramSchema.map((field) => (
+                    <label key={field.key} className="flex flex-col gap-1.5 text-[13px] text-secondary-text">
+                      <span>
+                        {field.label}
+                        {field.required ? <span className="text-error"> *</span> : null}
+                      </span>
+                      <input
+                        type={field.type === "secret" ? "password" : field.type === "number" ? "number" : "text"}
+                        className="rounded-md border border-border bg-card-bg px-2 py-2 text-text"
+                        value={scriptDialog.templateParams[field.key] ?? ""}
+                        onChange={(event) =>
+                          setScriptDialog((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  templateParams: {
+                                    ...prev.templateParams,
+                                    [field.key]: event.target.value,
+                                  },
+                                  error: "",
+                                }
+                              : prev,
+                          )
+                        }
+                        placeholder={field.defaultValue ?? `请输入 ${field.label}`}
+                      />
+                      {field.description ? (
+                        <span className="text-fs-caption text-secondary-text">{field.description}</span>
+                      ) : null}
+                    </label>
+                  ))}
+                </div>
+              </section>
+            ) : null}
             {scriptDialog.error ? <div className="text-fs-caption text-error">{scriptDialog.error}</div> : null}
             <div className="flex justify-end gap-2">
               <button type="button" className="btn" onClick={() => setScriptDialog(null)}>
@@ -708,8 +886,33 @@ export default function DetailPanel({
                     setScriptDialog((prev) => (prev ? { ...prev, error: "启动命令不能为空" } : prev));
                     return;
                   }
+                  const paramSchema = mergeScriptParamSchema(
+                    start,
+                    scriptDialog.paramSchema,
+                    scriptDialog.templateParams,
+                  );
+                  const templateParams = buildTemplateParams(paramSchema, scriptDialog.templateParams);
+                  const rendered = renderScriptTemplateCommand({
+                    id: "validation-only",
+                    name,
+                    start,
+                    stop: stop ? stop : null,
+                    paramSchema,
+                    templateParams,
+                  });
+                  if (!rendered.ok) {
+                    setScriptDialog((prev) => (prev ? { ...prev, error: rendered.error } : prev));
+                    return;
+                  }
+                  const scriptPayload = {
+                    name,
+                    start,
+                    stop: stop ? stop : null,
+                    paramSchema: paramSchema.length > 0 ? paramSchema : undefined,
+                    templateParams: paramSchema.length > 0 ? templateParams : undefined,
+                  };
                   if (scriptDialog.mode === "new") {
-                    void onAddProjectScript(project.id, { name, start, stop: stop ? stop : null }).then(() =>
+                    void onAddProjectScript(project.id, scriptPayload).then(() =>
                       setScriptDialog(null),
                     );
                     return;
@@ -719,8 +922,8 @@ export default function DetailPanel({
                     setScriptDialog((prev) => (prev ? { ...prev, error: "命令不存在或已被删除" } : prev));
                     return;
                   }
-                  void onUpdateProjectScript(project.id, { ...target, name, start, stop: stop ? stop : null }).then(
-                    () => setScriptDialog(null),
+                  void onUpdateProjectScript(project.id, { ...target, ...scriptPayload }).then(() =>
+                    setScriptDialog(null),
                   );
                 }}
               >
@@ -732,6 +935,31 @@ export default function DetailPanel({
       ) : null}
     </aside>
   );
+}
+
+function createScriptDialogState(input: {
+  mode: "new" | "edit";
+  scriptId: string | null;
+  name: string;
+  start: string;
+  stop: string;
+  paramSchema?: ScriptParamField[] | null;
+  templateParams?: Record<string, string> | null;
+}): ScriptDialogState {
+  const start = input.start ?? "";
+  const paramSchema = mergeScriptParamSchema(start, input.paramSchema, input.templateParams);
+  const templateParams = buildTemplateParams(paramSchema, input.templateParams);
+  return {
+    mode: input.mode,
+    scriptId: input.scriptId,
+    name: input.name ?? "",
+    start,
+    stop: input.stop ?? "",
+    error: "",
+    selectedSharedScriptId: "",
+    paramSchema,
+    templateParams,
+  };
 }
 
 function createTodoItemId(): string {
