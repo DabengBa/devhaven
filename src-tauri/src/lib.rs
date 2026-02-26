@@ -8,6 +8,7 @@ mod models;
 mod notes;
 mod project_loader;
 mod shared_scripts;
+mod skills;
 mod storage;
 mod system;
 mod terminal;
@@ -27,6 +28,8 @@ use crate::models::{
     AppStateFile, BranchListItem, CodexMonitorSnapshot, FsListResponse, FsReadResponse,
     FsWriteResponse, GitDailyResult, GitDiffContents, GitIdentity, GitRepoStatus,
     GitWorktreeAddResult, GitWorktreeListItem, HeatmapCacheFile, InteractionLockPayload,
+    GitWorktreeAddResult, GitWorktreeListItem, GlobalSkillInstallRequest, GlobalSkillInstallResult,
+    GlobalSkillUninstallRequest, GlobalSkillsSnapshot, HeatmapCacheFile, InteractionLockPayload,
     MarkdownFileEntry, Project, ProjectNotesPreview, SharedScriptEntry, SharedScriptManifestScript,
     TerminalCodexPaneOverlay, TerminalWorkspace, TerminalWorkspaceSummary,
     WorktreeInitCancelResult, WorktreeInitCreateBlockingResult, WorktreeInitJobStatus,
@@ -57,6 +60,48 @@ fn save_app_state(app: AppHandle, state: AppStateFile) -> Result<(), String> {
 /// 读取项目缓存列表。
 fn load_projects(app: AppHandle) -> Result<Vec<Project>, String> {
     log_command_result("load_projects", || storage::load_projects(&app))
+}
+
+#[tauri::command]
+/// 扫描并返回全局可用的 Skills 列表。
+fn list_global_skills() -> Result<GlobalSkillsSnapshot, String> {
+    log_command_result("list_global_skills", skills::list_global_skills)
+}
+
+#[tauri::command]
+/// 安装全局 Skill（参考开源 skills 的安装流程，在应用内执行）。
+fn install_global_skill(
+    request: GlobalSkillInstallRequest,
+) -> Result<GlobalSkillInstallResult, String> {
+    let source = request.source.clone();
+    let skill_count = request.skill_names.len();
+    let agent_count = request.agent_ids.len();
+    log_command_result("install_global_skill", move || {
+        log::info!(
+            "install_global_skill source={} skills={} agents={}",
+            source,
+            skill_count,
+            agent_count
+        );
+        skills::install_global_skill(request)
+    })
+}
+
+#[tauri::command]
+/// 从指定 Agent 卸载全局 Skill。
+fn uninstall_global_skill(
+    request: GlobalSkillUninstallRequest,
+) -> Result<GlobalSkillInstallResult, String> {
+    let agent_id = request.agent_id.clone();
+    let skill_name = request.skill_name.clone();
+    log_command_result("uninstall_global_skill", move || {
+        log::info!(
+            "uninstall_global_skill skill={} agent={}",
+            skill_name,
+            agent_id
+        );
+        skills::uninstall_global_skill(request)
+    })
 }
 
 #[tauri::command]
@@ -760,6 +805,9 @@ pub fn run() {
             load_app_state,
             save_app_state,
             load_projects,
+            list_global_skills,
+            install_global_skill,
+            uninstall_global_skill,
             save_projects,
             discover_projects,
             build_projects,

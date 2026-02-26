@@ -65,7 +65,7 @@ export type SettingsModalProps = {
   onSaveSettings: (settings: AppSettings) => Promise<void>;
 };
 
-/** 设置弹窗，左侧分类、右侧内容，统一承载应用设置项。 */
+/** 设置弹窗，左侧分类、右侧内容，统一承载更新、终端与协作设置项。 */
 export default function SettingsModal({
   settings,
   onClose,
