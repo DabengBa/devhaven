@@ -12,6 +12,8 @@ pub struct AppStateFile {
     pub directories: Vec<String>,
     #[serde(default, rename = "recycleBin")]
     pub recycle_bin: Vec<String>,
+    #[serde(default, rename = "favoriteProjectPaths")]
+    pub favorite_project_paths: Vec<String>,
     #[serde(default)]
     pub settings: AppSettings,
 }
@@ -52,6 +54,7 @@ impl Default for AppStateFile {
             tags: Vec::new(),
             directories: Vec::new(),
             recycle_bin: Vec::new(),
+            favorite_project_paths: Vec::new(),
             settings: AppSettings::default(),
         }
     }
@@ -161,6 +164,8 @@ pub struct Project {
     pub checksum: String,
     pub git_commits: i64,
     pub git_last_commit: SwiftDate,
+    #[serde(default)]
+    pub git_last_commit_message: Option<String>,
     pub git_daily: Option<String>,
     pub created: SwiftDate,
     pub checked: SwiftDate,

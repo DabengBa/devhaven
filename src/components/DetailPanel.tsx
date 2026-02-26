@@ -5,7 +5,7 @@ import type { Project, ProjectScript, TagData } from "../models/types";
 import type { BranchListItem } from "../models/branch";
 import { swiftDateToJsDate } from "../models/types";
 import { readProjectMarkdownFile } from "../services/markdown";
-import { readProjectNotes, writeProjectNotes } from "../services/notes";
+import { readProjectNotes, readProjectTodo, writeProjectNotes, writeProjectTodo } from "../services/notes";
 import { listBranches } from "../services/git";
 import { formatPathWithTilde } from "../utils/pathDisplay";
 import { IconX } from "./Icons";
@@ -29,6 +29,11 @@ export type DetailPanelProps = {
 };
 
 type DetailTab = "overview" | "branches";
+type TodoItem = {
+  id: string;
+  text: string;
+  done: boolean;
+};
 
 /** 格式化 Swift 时间戳为中文时间。 */
 const formatDate = (swiftDate: number) => {
@@ -56,6 +61,10 @@ export default function DetailPanel({
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const [notes, setNotes] = useState("");
   const [notesSnapshot, setNotesSnapshot] = useState("");
+  const [todoItems, setTodoItems] = useState<TodoItem[]>([]);
+  const [todoSnapshot, setTodoSnapshot] = useState("");
+  const [todoDraft, setTodoDraft] = useState("");
+  const [todoLoaded, setTodoLoaded] = useState(false);
   const [hasProjectNotes, setHasProjectNotes] = useState(false);
   const [notesLoaded, setNotesLoaded] = useState(false);
   const [fallbackReadme, setFallbackReadme] = useState<{
@@ -75,6 +84,7 @@ export default function DetailPanel({
   } | null>(null);
 
   const saveTimer = useRef<number | null>(null);
+  const todoSaveTimer = useRef<number | null>(null);
 
   const projectTags = useMemo(() => project?.tags ?? [], [project]);
   const availableTags = useMemo(
@@ -85,9 +95,13 @@ export default function DetailPanel({
   useEffect(() => {
     if (!project) {
       setNotesLoaded(false);
+      setTodoLoaded(false);
       setHasProjectNotes(false);
       setFallbackReadme(null);
       setFallbackReadmeLoading(false);
+      setTodoItems([]);
+      setTodoSnapshot("");
+      setTodoDraft("");
       return;
     }
 
@@ -95,14 +109,22 @@ export default function DetailPanel({
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
+    if (todoSaveTimer.current) {
+      window.clearTimeout(todoSaveTimer.current);
+      todoSaveTimer.current = null;
+    }
 
     let cancelled = false;
     setNotesLoaded(false);
+    setTodoLoaded(false);
     setHasProjectNotes(false);
     setFallbackReadme(null);
     setFallbackReadmeLoading(false);
     setNotes("");
     setNotesSnapshot("");
+    setTodoItems([]);
+    setTodoSnapshot("");
+    setTodoDraft("");
 
     readProjectNotes(project.path)
       .then((value) => {
@@ -125,11 +147,34 @@ export default function DetailPanel({
         setNotesLoaded(true);
       });
 
+    readProjectTodo(project.path)
+      .then((value) => {
+        if (cancelled) {
+          return;
+        }
+        const parsedItems = parseTodoMarkdown(value ?? "");
+        setTodoItems(parsedItems);
+        setTodoSnapshot(serializeTodoMarkdown(parsedItems));
+        setTodoLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setTodoItems([]);
+        setTodoSnapshot("");
+        setTodoLoaded(true);
+      });
+
     return () => {
       cancelled = true;
       if (saveTimer.current) {
         window.clearTimeout(saveTimer.current);
         saveTimer.current = null;
+      }
+      if (todoSaveTimer.current) {
+        window.clearTimeout(todoSaveTimer.current);
+        todoSaveTimer.current = null;
       }
     };
   }, [project?.id]);
@@ -171,6 +216,37 @@ export default function DetailPanel({
       }
     };
   }, [notes, notesSnapshot, project?.id, project?.path]);
+
+  useEffect(() => {
+    if (!project || !todoLoaded) {
+      return;
+    }
+    const serialized = serializeTodoMarkdown(todoItems);
+    if (serialized === todoSnapshot) {
+      return;
+    }
+    if (todoSaveTimer.current) {
+      window.clearTimeout(todoSaveTimer.current);
+    }
+
+    const projectPath = project.path;
+    todoSaveTimer.current = window.setTimeout(() => {
+      void writeProjectTodo(projectPath, serialized ? serialized : null)
+        .then(() => {
+          setTodoSnapshot(serialized);
+        })
+        .catch(() => {
+          // 忽略保存失败，保留当前输入，等待后续编辑重试。
+        });
+    }, 400);
+
+    return () => {
+      if (todoSaveTimer.current) {
+        window.clearTimeout(todoSaveTimer.current);
+        todoSaveTimer.current = null;
+      }
+    };
+  }, [project, todoItems, todoLoaded, todoSnapshot]);
 
   useEffect(() => {
     if (!project || !notesLoaded || hasProjectNotes) {
@@ -243,6 +319,25 @@ export default function DetailPanel({
       return;
     }
     await onRemoveTagFromProject(project.id, tagName);
+  };
+
+  const handleAddTodo = () => {
+    const text = todoDraft.trim();
+    if (!text) {
+      return;
+    }
+    setTodoItems((prev) => [...prev, { id: createTodoItemId(), text, done: false }]);
+    setTodoDraft("");
+  };
+
+  const handleToggleTodo = (todoId: string, done: boolean) => {
+    setTodoItems((prev) =>
+      prev.map((item) => (item.id === todoId ? { ...item, done } : item)),
+    );
+  };
+
+  const handleRemoveTodo = (todoId: string) => {
+    setTodoItems((prev) => prev.filter((item) => item.id !== todoId));
   };
 
   const scripts = useMemo(() => project?.scripts ?? [], [project]);
@@ -349,6 +444,60 @@ export default function DetailPanel({
               </select>
             ) : (
               <div className="text-fs-caption text-secondary-text">暂无可添加标签</div>
+            )}
+          </section>
+
+          <section className="flex flex-col gap-2.5">
+            <div className="text-[14px] font-semibold">Todo</div>
+            <div className="flex items-center gap-2">
+              <input
+                className="flex-1 rounded-md border border-border bg-card-bg px-2 py-2 text-text"
+                value={todoDraft}
+                onChange={(event) => setTodoDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    handleAddTodo();
+                  }
+                }}
+                placeholder="输入待办并按回车添加"
+              />
+              <button className="btn" onClick={handleAddTodo}>
+                添加
+              </button>
+            </div>
+            {todoItems.length === 0 ? (
+              <div className="text-fs-caption text-secondary-text">暂无待办</div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {todoItems.map((item) => (
+                  <label
+                    key={item.id}
+                    className="flex items-center gap-2 rounded-md border border-border bg-card-bg px-2.5 py-2"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={item.done}
+                      onChange={(event) => handleToggleTodo(item.id, event.target.checked)}
+                    />
+                    <span className={`flex-1 text-[13px] ${item.done ? "text-secondary-text line-through" : "text-text"}`}>
+                      {item.text}
+                    </span>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      aria-label="删除待办"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        handleRemoveTodo(item.id);
+                      }}
+                    >
+                      <IconX size={12} />
+                    </button>
+                  </label>
+                ))}
+              </div>
             )}
           </section>
 
@@ -583,4 +732,48 @@ export default function DetailPanel({
       ) : null}
     </aside>
   );
+}
+
+function createTodoItemId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function parseTodoMarkdown(content: string): TodoItem[] {
+  if (!content.trim()) {
+    return [];
+  }
+  const lines = content.split(/\r?\n/);
+  const items: TodoItem[] = [];
+  for (const line of lines) {
+    const matched = line.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
+    if (!matched) {
+      continue;
+    }
+    const text = matched[2].trim();
+    if (!text) {
+      continue;
+    }
+    items.push({
+      id: createTodoItemId(),
+      text,
+      done: matched[1].toLowerCase() === "x",
+    });
+  }
+  return items;
+}
+
+function serializeTodoMarkdown(items: TodoItem[]): string {
+  return items
+    .map((item) => {
+      const text = item.text.trim();
+      if (!text) {
+        return null;
+      }
+      return `- [${item.done ? "x" : " "}] ${text}`;
+    })
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
 }

@@ -4,18 +4,22 @@ import type { Project } from "../models/types";
 import { swiftDateToJsDate } from "../models/types";
 import { openInFinder } from "../services/system";
 import { formatPathWithTilde } from "../utils/pathDisplay";
-import { IconCopy, IconFolder, IconRefresh, IconTrash } from "./Icons";
+import DropdownMenu from "./DropdownMenu";
+import { IconCode, IconCopy, IconFolder, IconRefresh, IconStar, IconTrash } from "./Icons";
 
 export type ProjectListRowProps = {
   project: Project;
   isSelected: boolean;
+  isFavorite: boolean;
   selectedProjectIds: Set<string>;
   notePreview: string;
   onSelect: (event: React.MouseEvent<HTMLDivElement>) => void;
   onOpenTerminal: (project: Project) => void;
+  onRunProjectScript: (projectId: string, scriptId: string) => Promise<void>;
   onRefreshProject: (path: string) => void;
   onCopyPath: (path: string) => void;
   onMoveToRecycleBin: (project: Project) => void;
+  onToggleFavorite: (path: string) => void;
 };
 
 const formatDateTime = (swiftDate: number) => {
@@ -25,18 +29,40 @@ const formatDateTime = (swiftDate: number) => {
   return swiftDateToJsDate(swiftDate).toLocaleString("zh-CN");
 };
 
+const resolveLastCommitSummary = (project: Project) => {
+  if ((project.git_commits ?? 0) <= 0) {
+    return "非 Git 项目";
+  }
+  const message = (project.git_last_commit_message ?? "").trim();
+  return message || "暂无提交摘要";
+};
+
 function ProjectListRow({
   project,
   isSelected,
+  isFavorite,
   selectedProjectIds,
   notePreview,
   onSelect,
   onOpenTerminal,
+  onRunProjectScript,
   onRefreshProject,
   onCopyPath,
   onMoveToRecycleBin,
+  onToggleFavorite,
 }: ProjectListRowProps) {
   const displayPath = formatPathWithTilde(project.path);
+  const lastCommitSummary = resolveLastCommitSummary(project);
+  const scripts = project.scripts ?? [];
+  const scriptMenuItems = scripts.length
+    ? scripts.map((script) => ({
+        key: script.id,
+        label: `运行：${script.name}`,
+        onClick: () => {
+          void onRunProjectScript(project.id, script.id);
+        },
+      }))
+    : [{ key: "empty", label: "暂无快捷命令", disabled: true }];
 
   const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
     const ids = selectedProjectIds.has(project.id)
@@ -74,10 +100,24 @@ function ProjectListRow({
       <div className="truncate text-secondary-text" title={formatDateTime(project.mtime)}>
         {formatDateTime(project.mtime)}
       </div>
-      <div className="truncate text-secondary-text" title={notePreview}>
-        {notePreview}
+      <div className="min-w-0">
+        <div className="truncate text-secondary-text" title={lastCommitSummary}>
+          {lastCommitSummary}
+        </div>
+        <div className="truncate text-[11px] text-secondary-text" title={notePreview}>
+          备注：{notePreview}
+        </div>
       </div>
       <div className="ml-auto inline-flex items-center justify-end gap-1">
+        <DropdownMenu label={<IconCode size={16} />} ariaLabel="运行快捷命令" items={scriptMenuItems} />
+        <button
+          className={`icon-btn ${isFavorite ? "text-amber-500" : "text-titlebar-icon"}`}
+          aria-label={isFavorite ? "取消收藏" : "收藏项目"}
+          title={isFavorite ? "取消收藏" : "收藏项目"}
+          onClick={(event) => handleActionClick(event, () => void onToggleFavorite(project.path))}
+        >
+          <IconStar size={16} fill={isFavorite ? "currentColor" : "none"} />
+        </button>
         <button
           className="icon-btn text-titlebar-icon"
           aria-label="在 Finder 中显示"

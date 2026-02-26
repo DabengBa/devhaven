@@ -19,7 +19,7 @@ DevHaven 是一个基于 **Tauri + React** 的桌面应用：前端负责 UI/交
 
 ### 本地数据落盘位置（便于排查）
 - 应用数据目录：`~/.devhaven/`（实现：`src-tauri/src/storage.rs`）
-  - `app_state.json`：应用状态（目录、标签、回收站、设置等）
+  - `app_state.json`：应用状态（目录、标签、回收站、收藏项目、设置等）
   - `projects.json`：项目缓存列表
   - `heatmap_cache.json`：热力图缓存
   - `terminal_workspaces.json`：终端工作区/布局缓存
@@ -34,16 +34,20 @@ DevHaven 是一个基于 **Tauri + React** 的桌面应用：前端负责 UI/交
 ### A. 工作目录/项目扫描与项目列表
 - 侧边栏「目录」区：`src/components/Sidebar.tsx`
 - 主列表渲染（卡片/列表模式切换）：`src/components/MainContent.tsx`、`src/components/ProjectCard.tsx`、`src/components/ProjectListRow.tsx`
+- 主列表快捷命令入口（卡片/列表直接运行 `Project.scripts`）：`src/components/ProjectCard.tsx`、`src/components/ProjectListRow.tsx`、`src/App.tsx`
+- 主列表多选批量操作（批量复制路径/刷新/打标/移入回收站）：`src/components/MainContent.tsx`、`src/App.tsx`、`src/state/useDevHaven.ts`
 - 核心状态与动作（刷新/扫描/合并/持久化）：`src/state/useDevHaven.ts`、`src/state/DevHavenContext.tsx`
 - 调用 Tauri 命令：`src/services/appStorage.ts`（`discoverProjects/buildProjects/load/save`）
 - 扫描与构建项目元数据（是否 Git 仓库、提交数、最后提交时间）：`src-tauri/src/project_loader.rs`
 - Command 注册处：`src-tauri/src/lib.rs`（`discover_projects`、`build_projects`、`load_projects`、`save_projects`）
 - 列表模式备注预览（批量读取 `PROJECT_NOTES.md` 首行）：`src/services/notes.ts`（`readProjectNotesPreviews`） ↔ `src-tauri/src/notes.rs`（`read_notes_previews`） ↔ `src-tauri/src/lib.rs`（`read_project_notes_previews`）
+- 列表行最近提交摘要（展示 `git log -1 --format=%s`，非 Git 项目显示占位）：`src/components/ProjectListRow.tsx`、`src/components/MainContent.tsx`、`src-tauri/src/project_loader.rs`
 
 ### B. 筛选（标签/目录/搜索/时间范围/Git 状态）
 - 筛选状态与组合逻辑（搜索词、目录、标签、日期、Git Filter 等）：`src/App.tsx`
 - 筛选模型与选项：`src/models/filters.ts`
 - 搜索输入组件：`src/components/SearchBar.tsx`
+- 全局命令面板（`⌘K/Ctrl+K`，支持项目跳转/脚本运行/筛选切换）：`src/components/CommandPalette.tsx`、`src/App.tsx`
 
 ### C. 标签管理（新建/编辑/隐藏/颜色/批量打标）
 - 标签列表与入口：`src/components/Sidebar.tsx`
@@ -65,6 +69,11 @@ DevHaven 是一个基于 **Tauri + React** 的桌面应用：前端负责 UI/交
   - README 回退读取：`src/services/markdown.ts`（`read_project_markdown_file`）
   - 后端：`src-tauri/src/notes.rs`
   - Command：`src-tauri/src/lib.rs`（`read_project_notes/read_project_notes_previews/write_project_notes`）
+- 项目 Todo `PROJECT_TODO.md`（详情面板可勾选、增删、自动保存）：
+  - UI：`src/components/DetailPanel.tsx`
+  - 前端：`src/services/notes.ts`
+  - 后端：`src-tauri/src/notes.rs`
+  - Command：`src-tauri/src/lib.rs`（`read_project_todo/write_project_todo`）
 - 项目内 Markdown 文件浏览/预览：
   - UI：`src/components/ProjectMarkdownSection.tsx`
   - 前端：`src/services/markdown.ts`
@@ -79,6 +88,7 @@ DevHaven 是一个基于 **Tauri + React** 的桌面应用：前端负责 UI/交
 - Git 每日提交统计（批量）：`src/services/gitDaily.ts` ↔ `src-tauri/src/git_daily.rs`（Command：`collect_git_daily`）
 - 热力图数据管理（缓存/加载/计算）：`src/state/useHeatmapData.ts`、`src/services/heatmap.ts`
 - 侧边栏热力图组件：`src/components/Heatmap.tsx`（在 `src/components/Sidebar.tsx` 使用）
+- 热力图日期下钻（点击日期展示当天活跃项目清单，并一键定位到项目）：`src/App.tsx`、`src/components/Sidebar.tsx`、`src/utils/gitDaily.ts`
 - 仪表盘弹窗：`src/components/DashboardModal.tsx`（数据模型：`src/models/dashboard.ts`）
 
 ### F. 回收站（隐藏项目/恢复）

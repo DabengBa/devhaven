@@ -6,11 +6,19 @@ import type { CodexSessionView } from "../models/codex";
 import { HEATMAP_CONFIG } from "../models/heatmap";
 import type { AppStateFile, Project, TagData } from "../models/types";
 import { colorDataToHex } from "../utils/colors";
+import { formatPathWithTilde } from "../utils/pathDisplay";
 import CodexSessionSection from "./CodexSessionSection";
 import Heatmap from "./Heatmap";
 import DropdownMenu from "./DropdownMenu";
 import { IconEye, IconEyeOff, IconMoreHorizontal, IconPlusCircle, IconTrash } from "./Icons";
 import { openInFinder } from "../services/system";
+
+export type HeatmapActiveProject = {
+  projectId: string;
+  projectName: string;
+  projectPath: string;
+  commitCount: number;
+};
 
 export type SidebarProps = {
   appState: AppStateFile;
@@ -20,9 +28,11 @@ export type SidebarProps = {
   selectedTags: Set<string>;
   selectedDirectory: string | null;
   heatmapFilteredProjectIds: Set<string>;
+  heatmapActiveProjects: HeatmapActiveProject[];
   onSelectTag: (tag: string) => void;
   onClearHeatmapFilter: () => void;
   onSelectHeatmapDate: (entry: HeatmapData | null) => void;
+  onLocateHeatmapProject: (projectId: string) => void;
   onSelectDirectory: (directory: string | null) => void;
   onOpenTagEditor: (tag?: TagData) => void;
   onToggleTagHidden: (name: string) => void;
@@ -49,9 +59,11 @@ export default function Sidebar({
   selectedTags,
   selectedDirectory,
   heatmapFilteredProjectIds,
+  heatmapActiveProjects,
   onSelectTag,
   onClearHeatmapFilter,
   onSelectHeatmapDate,
+  onLocateHeatmapProject,
   onSelectDirectory,
   onOpenTagEditor,
   onToggleTagHidden,
@@ -202,6 +214,37 @@ export default function Sidebar({
           ) : (
             <div className="px-3 py-2 text-fs-caption text-secondary-text">暂无数据</div>
           )}
+          {heatmapSelectedDateKey ? (
+            <div className="mt-2 flex flex-col gap-1 px-2">
+              <div className="px-1 text-[11px] text-secondary-text">
+                {heatmapSelectedDateKey} · {heatmapActiveProjects.length} 个活跃项目
+              </div>
+              {heatmapActiveProjects.length === 0 ? (
+                <div className="px-1 py-1 text-[11px] text-secondary-text">当天无活跃项目</div>
+              ) : (
+                <div className="max-h-40 overflow-y-auto rounded-md border border-sidebar-border bg-[rgba(255,255,255,0.02)]">
+                  {heatmapActiveProjects.map((item) => (
+                    <button
+                      key={item.projectId}
+                      type="button"
+                      className="flex w-full items-start gap-2 px-2 py-1.5 text-left hover:bg-sidebar-selected/50"
+                      onClick={() => onLocateHeatmapProject(item.projectId)}
+                    >
+                      <span className="mt-[2px] min-w-6 rounded bg-sidebar-selected px-1 py-[1px] text-center text-[11px] text-accent">
+                        {item.commitCount}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-fs-caption text-text">{item.projectName}</span>
+                        <span className="block truncate text-[11px] text-secondary-text">
+                          {formatPathWithTilde(item.projectPath)}
+                        </span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
         </section>
 
         <div className="my-2 h-px bg-divider" />

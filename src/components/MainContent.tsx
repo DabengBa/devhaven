@@ -4,6 +4,7 @@ import type { Project, ProjectListViewMode } from "../models/types";
 import type { DateFilter, GitFilter } from "../models/filters";
 import { DATE_FILTER_OPTIONS, GIT_FILTER_OPTIONS } from "../models/filters";
 import { readProjectNotesPreviews } from "../services/notes";
+import DropdownMenu from "./DropdownMenu";
 import ProjectCard from "./ProjectCard";
 import ProjectListRow from "./ProjectListRow";
 import SearchBar from "./SearchBar";
@@ -20,6 +21,7 @@ import {
 export type MainContentProps = {
   projects: Project[];
   filteredProjects: Project[];
+  favoriteProjectPaths: Set<string>;
   recycleBinCount: number;
   isLoading: boolean;
   error: string | null;
@@ -35,14 +37,22 @@ export type MainContentProps = {
   onToggleDetailPanel: () => void;
   onOpenDashboard: () => void;
   onOpenSettings: () => void;
+  availableTags: string[];
   selectedProjects: Set<string>;
   onSelectProject: (project: Project, event: React.MouseEvent<HTMLDivElement>) => void;
+  onClearSelectedProjects: () => void;
+  onBulkCopyProjectPaths: (projectIds: string[]) => Promise<void>;
+  onBulkRefreshProjects: (projectIds: string[]) => Promise<void>;
+  onBulkMoveToRecycleBin: (projectIds: string[]) => Promise<void>;
+  onBulkAssignTagToProjects: (tag: string, projectIds: string[]) => Promise<void>;
   onTagSelected: (tag: string) => void;
   onRemoveTagFromProject: (projectId: string, tag: string) => void;
   onRefreshProject: (path: string) => void;
   onCopyPath: (path: string) => void;
   onOpenTerminal: (project: Project) => void;
+  onRunProjectScript: (projectId: string, scriptId: string) => Promise<void>;
   onMoveToRecycleBin: (project: Project) => void;
+  onToggleFavorite: (path: string) => void;
   getTagColor: (tag: string) => string;
   searchInputRef: React.RefObject<HTMLInputElement | null>;
 };
@@ -51,6 +61,7 @@ export type MainContentProps = {
 export default function MainContent({
   projects,
   filteredProjects,
+  favoriteProjectPaths,
   recycleBinCount,
   isLoading,
   error,
@@ -66,20 +77,42 @@ export default function MainContent({
   onToggleDetailPanel,
   onOpenDashboard,
   onOpenSettings,
+  availableTags,
   selectedProjects,
   onSelectProject,
+  onClearSelectedProjects,
+  onBulkCopyProjectPaths,
+  onBulkRefreshProjects,
+  onBulkMoveToRecycleBin,
+  onBulkAssignTagToProjects,
   onTagSelected,
   onRemoveTagFromProject,
   onRefreshProject,
   onCopyPath,
   onOpenTerminal,
+  onRunProjectScript,
   onMoveToRecycleBin,
+  onToggleFavorite,
   getTagColor,
   searchInputRef,
 }: MainContentProps) {
   const [notePreviewByPath, setNotePreviewByPath] = useState<Record<string, string>>({});
   const [isNotesPreviewLoading, setIsNotesPreviewLoading] = useState(false);
   const previewRequestIdRef = useRef(0);
+  const selectedProjectIds = useMemo(() => Array.from(selectedProjects), [selectedProjects]);
+  const bulkTagMenuItems = useMemo(
+    () =>
+      availableTags.length
+        ? availableTags.map((tag) => ({
+            key: `bulk-tag-${tag}`,
+            label: `添加标签：${tag}`,
+            onClick: () => {
+              void onBulkAssignTagToProjects(tag, selectedProjectIds);
+            },
+          }))
+        : [{ key: "bulk-tag-empty", label: "暂无可用标签", disabled: true }],
+    [availableTags, onBulkAssignTagToProjects, selectedProjectIds],
+  );
   const listProjectPaths = useMemo(() => filteredProjects.map((project) => project.path), [filteredProjects]);
   const listProjectPathsKey = useMemo(() => listProjectPaths.join("\n"), [listProjectPaths]);
 
@@ -203,6 +236,29 @@ export default function MainContent({
           </button>
         </div>
       </div>
+      {selectedProjectIds.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-search-area-border bg-[rgba(69,59,231,0.08)] px-3 py-2">
+          <span className="text-[12px] font-semibold text-accent">已选 {selectedProjectIds.length} 个项目</span>
+          <button className="btn btn-outline !px-2.5 !py-1 text-[12px]" onClick={() => void onBulkCopyProjectPaths(selectedProjectIds)}>
+            复制路径
+          </button>
+          <button className="btn btn-outline !px-2.5 !py-1 text-[12px]" onClick={() => void onBulkRefreshProjects(selectedProjectIds)}>
+            批量刷新
+          </button>
+          <button className="btn btn-outline !px-2.5 !py-1 text-[12px]" onClick={() => void onBulkMoveToRecycleBin(selectedProjectIds)}>
+            移入回收站
+          </button>
+          <DropdownMenu
+            label={<span className="text-[12px] font-semibold">批量打标签</span>}
+            items={bulkTagMenuItems}
+            ariaLabel="批量打标签"
+            align="left"
+          />
+          <button className="btn btn-outline !px-2.5 !py-1 text-[12px]" onClick={onClearSelectedProjects}>
+            清除选择
+          </button>
+        </div>
+      ) : null}
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {isLoading ? (
@@ -235,8 +291,8 @@ export default function MainContent({
           <div className="flex flex-col gap-3 p-4">
             <div className="grid grid-cols-[minmax(220px,2.2fr)_170px_minmax(180px,2fr)_116px] items-center gap-3 px-3 text-fs-caption font-semibold text-secondary-text">
               <div>项目</div>
-              <div>最后时间</div>
-              <div>备注</div>
+              <div>更新时间</div>
+              <div>最近提交 / 备注</div>
               <div className="text-right">操作</div>
             </div>
             <div className="overflow-hidden rounded-xl border border-card-border bg-card-bg">
@@ -245,13 +301,16 @@ export default function MainContent({
                   key={project.id}
                   project={project}
                   isSelected={selectedProjects.has(project.id)}
+                  isFavorite={favoriteProjectPaths.has(project.path)}
                   selectedProjectIds={selectedProjects}
                   notePreview={notePreviewByPath[project.path] ?? (isNotesPreviewLoading ? "加载中..." : "—")}
                   onSelect={(event) => onSelectProject(project, event)}
                   onOpenTerminal={onOpenTerminal}
+                  onRunProjectScript={onRunProjectScript}
                   onRefreshProject={onRefreshProject}
                   onCopyPath={onCopyPath}
                   onMoveToRecycleBin={onMoveToRecycleBin}
+                  onToggleFavorite={onToggleFavorite}
                 />
               ))}
             </div>
@@ -263,15 +322,18 @@ export default function MainContent({
                 key={project.id}
                 project={project}
                 isSelected={selectedProjects.has(project.id)}
+                isFavorite={favoriteProjectPaths.has(project.path)}
                 selectedProjectIds={selectedProjects}
                 onSelect={(event) => onSelectProject(project, event)}
                 onOpenTerminal={onOpenTerminal}
+                onRunProjectScript={onRunProjectScript}
                 onTagClick={onTagSelected}
                 onRemoveTag={onRemoveTagFromProject}
                 getTagColor={getTagColor}
                 onRefreshProject={onRefreshProject}
                 onCopyPath={onCopyPath}
                 onMoveToRecycleBin={onMoveToRecycleBin}
+                onToggleFavorite={onToggleFavorite}
               />
             ))}
           </div>

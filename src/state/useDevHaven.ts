@@ -18,6 +18,7 @@ const emptyState: AppStateFile = {
   tags: [],
   directories: [],
   recycleBin: [],
+  favoriteProjectPaths: [],
   settings: {
     editorOpenTool: {
       commandPath: "",
@@ -36,9 +37,12 @@ const emptyState: AppStateFile = {
 };
 
 function normalizeAppState(state: AppStateFile): AppStateFile {
+  const directories = normalizePathList(state.directories);
   return {
     ...state,
-    recycleBin: state.recycleBin ?? [],
+    directories,
+    recycleBin: normalizePathList(state.recycleBin),
+    favoriteProjectPaths: normalizePathList(state.favoriteProjectPaths),
   };
 }
 
@@ -66,7 +70,9 @@ export type DevHavenActions = {
   addDirectory: (path: string) => Promise<void>;
   removeDirectory: (path: string) => Promise<void>;
   moveProjectToRecycleBin: (path: string) => Promise<void>;
+  moveProjectsToRecycleBin: (paths: string[]) => Promise<void>;
   restoreProjectFromRecycleBin: (path: string) => Promise<void>;
+  toggleProjectFavorite: (path: string) => Promise<void>;
   updateSettings: (settings: AppStateFile["settings"]) => Promise<void>;
   updateTags: (tags: TagData[]) => Promise<void>;
   addTag: (name: string, colorHex?: string) => Promise<void>;
@@ -75,6 +81,7 @@ export type DevHavenActions = {
   toggleTagHidden: (name: string) => Promise<void>;
   setTagColor: (name: string, colorHex: string) => Promise<void>;
   addTagToProject: (projectId: string, tag: string) => Promise<void>;
+  addTagToProjects: (projectIds: string[], tag: string) => Promise<void>;
   removeTagFromProject: (projectId: string, tag: string) => Promise<void>;
 };
 
@@ -438,7 +445,11 @@ export function useDevHaven(): DevHavenStore {
   /** 添加需要扫描的工作目录并持久化。 */
   const addDirectory = useCallback(
     async (path: string) => {
-      const nextDirectories = Array.from(new Set([...appState.directories, path]));
+      const normalizedPath = path.trim();
+      if (!normalizedPath) {
+        return;
+      }
+      const nextDirectories = Array.from(new Set([...appState.directories, normalizedPath]));
       const nextState = { ...appState, directories: nextDirectories };
       await commitAppState(nextState);
     },
@@ -456,16 +467,25 @@ export function useDevHaven(): DevHavenStore {
   );
 
   /** 将项目路径移入回收站并持久化。 */
-  const moveProjectToRecycleBin = useCallback(
-    async (path: string) => {
-      if (!path) {
+  const moveProjectsToRecycleBin = useCallback(
+    async (paths: string[]) => {
+      const normalizedPaths = normalizePathList(paths);
+      if (normalizedPaths.length === 0) {
         return;
       }
-      const nextRecycleBin = Array.from(new Set([...appState.recycleBin, path]));
+      const nextRecycleBin = Array.from(new Set([...appState.recycleBin, ...normalizedPaths]));
       const nextState = { ...appState, recycleBin: nextRecycleBin };
       await commitAppState(nextState);
     },
     [appState, commitAppState],
+  );
+
+  /** 将项目路径移入回收站并持久化。 */
+  const moveProjectToRecycleBin = useCallback(
+    async (path: string) => {
+      await moveProjectsToRecycleBin([path]);
+    },
+    [moveProjectsToRecycleBin],
   );
 
   /** 从回收站恢复项目路径并持久化。 */
@@ -480,6 +500,28 @@ export function useDevHaven(): DevHavenStore {
     },
     [appState, commitAppState],
   );
+
+  /** 切换项目收藏状态并持久化。 */
+  const toggleProjectFavorite = useCallback(
+    async (path: string) => {
+      const normalizedPath = path.trim();
+      if (!normalizedPath) {
+        return;
+      }
+
+      const favorites = new Set(appState.favoriteProjectPaths ?? []);
+      if (favorites.has(normalizedPath)) {
+        favorites.delete(normalizedPath);
+      } else {
+        favorites.add(normalizedPath);
+      }
+
+      const nextState = { ...appState, favoriteProjectPaths: Array.from(favorites) };
+      await commitAppState(nextState);
+    },
+    [appState, commitAppState],
+  );
+
 
   /** 批量更新标签配置并持久化。 */
   const updateTags = useCallback(
@@ -590,17 +632,30 @@ export function useDevHaven(): DevHavenStore {
   );
 
   /** 为指定项目添加标签并同步全局标签。 */
-  const addTagToProject = useCallback(
-    async (projectId: string, tag: string) => {
+  const addTagToProjects = useCallback(
+    async (projectIds: string[], tag: string) => {
+      const normalizedTag = tag.trim();
+      const idSet = new Set(projectIds.map((id) => id.trim()).filter(Boolean));
+      if (!normalizedTag || idSet.size === 0) {
+        return;
+      }
       const nextProjects = projects.map((project) =>
-        project.id === projectId && !project.tags.includes(tag)
-          ? { ...project, tags: [...project.tags, tag] }
+        idSet.has(project.id) && !project.tags.includes(normalizedTag)
+          ? { ...project, tags: [...project.tags, normalizedTag] }
           : project,
       );
       await commitProjects(nextProjects);
       await syncTagsFromProjects(appState, nextProjects);
     },
     [appState, commitProjects, projects, syncTagsFromProjects],
+  );
+
+  /** 为指定项目添加标签并同步全局标签。 */
+  const addTagToProject = useCallback(
+    async (projectId: string, tag: string) => {
+      await addTagToProjects([projectId], tag);
+    },
+    [addTagToProjects],
   );
 
   /** 从指定项目移除标签。 */
@@ -637,7 +692,9 @@ export function useDevHaven(): DevHavenStore {
     addDirectory,
     removeDirectory,
     moveProjectToRecycleBin,
+    moveProjectsToRecycleBin,
     restoreProjectFromRecycleBin,
+    toggleProjectFavorite,
     updateSettings,
     updateTags,
     addTag,
@@ -646,6 +703,7 @@ export function useDevHaven(): DevHavenStore {
     toggleTagHidden,
     setTagColor,
     addTagToProject,
+    addTagToProjects,
     removeTagFromProject,
   };
 }
@@ -757,4 +815,11 @@ function normalizeProject(project: Project): Project {
     scripts: project.scripts ?? [],
     worktrees: project.worktrees ?? [],
   };
+}
+
+function normalizePathList(paths: string[] | null | undefined): string[] {
+  if (!paths) {
+    return [];
+  }
+  return Array.from(new Set(paths.map((path) => path.trim()).filter(Boolean)));
 }

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 export type DropdownItem = {
+  key?: string;
   label: string;
   onClick?: () => void;
   disabled?: boolean;
@@ -64,7 +65,7 @@ export default function DropdownMenu({ label, items, align = "right", ariaLabel 
         >
           {items.map((item) => (
             <button
-              key={item.label}
+              key={item.key ?? item.label}
               className={`rounded-md px-2.5 py-2 text-left text-text hover:bg-[rgba(255,255,255,0.06)] disabled:opacity-50 disabled:cursor-not-allowed ${
                 item.destructive ? "text-error" : ""
               }`}

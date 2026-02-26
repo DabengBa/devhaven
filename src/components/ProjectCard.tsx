@@ -4,20 +4,24 @@ import type { Project } from "../models/types";
 import { swiftDateToJsDate } from "../models/types";
 import { openInFinder } from "../services/system";
 import { formatPathWithTilde } from "../utils/pathDisplay";
-import { IconCalendar, IconCopy, IconFolder, IconRefresh, IconTrash, IconX } from "./Icons";
+import DropdownMenu from "./DropdownMenu";
+import { IconCalendar, IconCode, IconCopy, IconFolder, IconRefresh, IconStar, IconTrash, IconX } from "./Icons";
 
 export type ProjectCardProps = {
   project: Project;
   isSelected: boolean;
+  isFavorite: boolean;
   selectedProjectIds: Set<string>;
   onSelect: (event: React.MouseEvent<HTMLDivElement>) => void;
   onOpenTerminal: (project: Project) => void;
+  onRunProjectScript: (projectId: string, scriptId: string) => Promise<void>;
   onTagClick: (tag: string) => void;
   onRemoveTag: (projectId: string, tag: string) => void;
   getTagColor: (tag: string) => string;
   onRefreshProject: (path: string) => void;
   onCopyPath: (path: string) => void;
   onMoveToRecycleBin: (project: Project) => void;
+  onToggleFavorite: (path: string) => void;
 };
 
 /** 格式化 Swift 时间戳为中文日期。 */
@@ -33,17 +37,30 @@ const formatDate = (swiftDate: number) => {
 function ProjectCard({
   project,
   isSelected,
+  isFavorite,
   selectedProjectIds,
   onSelect,
   onOpenTerminal,
+  onRunProjectScript,
   onTagClick,
   onRemoveTag,
   getTagColor,
   onRefreshProject,
   onCopyPath,
   onMoveToRecycleBin,
+  onToggleFavorite,
 }: ProjectCardProps) {
   const displayPath = formatPathWithTilde(project.path);
+  const scripts = project.scripts ?? [];
+  const scriptMenuItems = scripts.length
+    ? scripts.map((script) => ({
+        key: script.id,
+        label: `运行：${script.name}`,
+        onClick: () => {
+          void onRunProjectScript(project.id, script.id);
+        },
+      }))
+    : [{ key: "empty", label: "暂无快捷命令", disabled: true }];
 
   const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
     const ids = selectedProjectIds.has(project.id)
@@ -71,6 +88,15 @@ function ProjectCard({
           {project.name}
         </div>
         <div className="ml-auto inline-flex items-center gap-1.5">
+          <DropdownMenu label={<IconCode size={16} />} ariaLabel="运行快捷命令" items={scriptMenuItems} />
+          <button
+            className={`icon-btn ${isFavorite ? "text-amber-500" : "text-titlebar-icon"}`}
+            aria-label={isFavorite ? "取消收藏" : "收藏项目"}
+            title={isFavorite ? "取消收藏" : "收藏项目"}
+            onClick={(event) => handleActionClick(event, () => void onToggleFavorite(project.path))}
+          >
+            <IconStar size={16} fill={isFavorite ? "currentColor" : "none"} />
+          </button>
           <button
             className="icon-btn text-titlebar-icon"
             aria-label="在 Finder 中显示"

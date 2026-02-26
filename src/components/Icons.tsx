@@ -159,6 +159,14 @@ export function IconPlusCircle(props: IconProps) {
   );
 }
 
+export function IconStar(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <polygon points="12 3.8 14.9 9.7 21.3 10.6 16.7 15.1 17.8 21.4 12 18.4 6.2 21.4 7.3 15.1 2.7 10.6 9.1 9.7" />
+    </IconBase>
+  );
+}
+
 export function IconMoreHorizontal(props: IconProps) {
   return (
     <IconBase {...props}>

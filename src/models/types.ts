@@ -72,6 +72,7 @@ export type AppStateFile = {
   tags: TagData[];
   directories: string[];
   recycleBin: string[];
+  favoriteProjectPaths: string[];
   settings: AppSettings;
 };
 
@@ -87,6 +88,7 @@ export type Project = {
   checksum: string;
   git_commits: number;
   git_last_commit: SwiftDate;
+  git_last_commit_message?: string | null;
   git_daily?: string | null;
   created: SwiftDate;
   checked: SwiftDate;

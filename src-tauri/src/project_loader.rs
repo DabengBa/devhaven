@@ -247,6 +247,7 @@ fn create_project(path: &str, existing_by_path: &HashMap<&str, &Project>) -> Opt
             checksum,
             git_commits: git_info.commit_count,
             git_last_commit: git_info.last_commit,
+            git_last_commit_message: git_info.last_commit_message.clone(),
             git_daily: existing.git_daily.clone(),
             created: existing.created,
             checked: now_swift(),
@@ -265,6 +266,7 @@ fn create_project(path: &str, existing_by_path: &HashMap<&str, &Project>) -> Opt
         checksum,
         git_commits: git_info.commit_count,
         git_last_commit: git_info.last_commit,
+        git_last_commit_message: git_info.last_commit_message,
         git_daily: None,
         created: now_swift(),
         checked: now_swift(),
@@ -274,15 +276,17 @@ fn create_project(path: &str, existing_by_path: &HashMap<&str, &Project>) -> Opt
 struct GitInfo {
     commit_count: i64,
     last_commit: f64,
+    last_commit_message: Option<String>,
 }
 
-// 读取 Git 信息（提交次数与最后提交时间）。
+// 读取 Git 信息（提交次数、最后提交时间与最后提交摘要）。
 fn load_git_info(path: &str) -> GitInfo {
     let git_dir = Path::new(path).join(".git");
     if !git_dir.exists() {
         return GitInfo {
             commit_count: 0,
             last_commit: 0.0,
+            last_commit_message: None,
         };
     }
 
@@ -294,9 +298,14 @@ fn load_git_info(path: &str) -> GitInfo {
         .and_then(|output| output.trim().parse::<i64>().ok())
         .unwrap_or(0);
 
+    let last_commit_message = run_git_command(path, &["log", "--format=%s", "-n", "1"])
+        .map(|output| output.trim().to_string())
+        .filter(|message| !message.is_empty());
+
     GitInfo {
         commit_count,
         last_commit: crate::time_utils::unix_to_swift(last_commit),
+        last_commit_message,
     }
 }
 

@@ -519,6 +519,25 @@ fn write_project_notes(path: String, notes: Option<String>) -> Result<(), String
 }
 
 #[tauri::command]
+/// 读取项目 Todo 内容。
+fn read_project_todo(path: String) -> Result<Option<String>, String> {
+    log_command_result("read_project_todo", || {
+        log::info!("read_project_todo path={}", path);
+        notes::read_todo(&path)
+    })
+}
+
+#[tauri::command]
+/// 写入项目 Todo 内容。
+fn write_project_todo(path: String, todo: Option<String>) -> Result<(), String> {
+    log_command_result("write_project_todo", || {
+        let todo_len = todo.as_ref().map(|value| value.len()).unwrap_or(0);
+        log::info!("write_project_todo path={} size={}", path, todo_len);
+        notes::write_todo(&path, todo)
+    })
+}
+
+#[tauri::command]
 /// 列出项目内的 Markdown 文件。
 fn list_project_markdown_files(path: String) -> Result<Vec<MarkdownFileEntry>, String> {
     log_command_result("list_project_markdown_files", || {
@@ -742,6 +761,8 @@ pub fn run() {
             read_project_notes,
             read_project_notes_previews,
             write_project_notes,
+            read_project_todo,
+            write_project_todo,
             list_project_markdown_files,
             read_project_markdown_file,
             list_project_dir_entries,

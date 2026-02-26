@@ -12,13 +12,14 @@ import SettingsModal from "./components/SettingsModal";
 import RecycleBinModal from "./components/RecycleBinModal";
 import MonitorWindow from "./components/MonitorWindow";
 import InteractionLockOverlay from "./components/InteractionLockOverlay";
+import CommandPalette, { type CommandPaletteItem } from "./components/CommandPalette";
 import WorktreeCreateDialog, {
   type WorktreeCreateSubmitPayload,
   type WorktreeCreateSubmitResult,
 } from "./components/terminal/WorktreeCreateDialog";
 import { useCodexMonitor } from "./hooks/useCodexMonitor";
 import type { DateFilter, GitFilter } from "./models/filters";
-import { DATE_FILTER_OPTIONS } from "./models/filters";
+import { DATE_FILTER_OPTIONS, GIT_FILTER_OPTIONS } from "./models/filters";
 import type { HeatmapData } from "./models/heatmap";
 import { HEATMAP_CONFIG } from "./models/heatmap";
 import type { TerminalWorkspaceSummary } from "./models/terminal";
@@ -26,7 +27,7 @@ import type { CodexAgentEvent, CodexMonitorSession, CodexSessionView } from "./m
 import type { ColorData, Project, ProjectListViewMode, ProjectWorktree, TagData } from "./models/types";
 import { jsDateToSwiftDate, swiftDateToJsDate } from "./models/types";
 import { colorDataToHex } from "./utils/colors";
-import { formatDateKey } from "./utils/gitDaily";
+import { formatDateKey, parseGitDaily } from "./utils/gitDaily";
 import { buildGitIdentitySignature } from "./utils/gitIdentity";
 import { pickColorForTag } from "./utils/tagColors";
 import { buildCodexProjectStatusById } from "./utils/codexProjectStatus";
@@ -53,6 +54,11 @@ import {
 const MONITOR_OPEN_SESSION_EVENT = "monitor-open-session";
 const MAIN_WINDOW_LABEL = "main";
 const TerminalWorkspaceWindow = lazy(() => import("./components/terminal/TerminalWorkspaceWindow"));
+
+type CommandPaletteAction = CommandPaletteItem & {
+  searchText: string;
+  run: () => void;
+};
 
 type MonitorOpenSessionPayload = {
   sessionId: string;
@@ -269,6 +275,14 @@ function shouldBlockReloadShortcut(event: KeyboardEvent): boolean {
   return true;
 }
 
+function resolveKeyboardEventTarget(event: KeyboardEvent): Element | null {
+  return event.target instanceof Element
+    ? event.target
+    : document.activeElement instanceof Element
+      ? document.activeElement
+      : null;
+}
+
 /** 应用主布局，负责筛选、状态联动与面板展示。 */
 function AppLayout() {
   const {
@@ -287,6 +301,7 @@ function AppLayout() {
     toggleTagHidden,
     setTagColor,
     addTagToProject,
+    addTagToProjects,
     removeTagFromProject,
     addProjectScript,
     updateProjectScript,
@@ -298,7 +313,9 @@ function AppLayout() {
     updateGitDaily,
     updateSettings,
     moveProjectToRecycleBin,
+    moveProjectsToRecycleBin,
     restoreProjectFromRecycleBin,
+    toggleProjectFavorite,
   } = useDevHavenContext();
 
   const [searchText, setSearchText] = useState("");
@@ -319,6 +336,9 @@ function AppLayout() {
   const [showSettings, setShowSettings] = useState(false);
   const [showRecycleBin, setShowRecycleBin] = useState(false);
   const [showTerminalWorkspace, setShowTerminalWorkspace] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
+  const [commandPaletteActiveIndex, setCommandPaletteActiveIndex] = useState(0);
   const [terminalOpenProjects, setTerminalOpenProjects] = useState<Project[]>([]);
   const [terminalActiveProjectId, setTerminalActiveProjectId] = useState<string | null>(null);
   const [terminalGitWorktreesByProjectId, setTerminalGitWorktreesByProjectId] = useState<
@@ -327,6 +347,19 @@ function AppLayout() {
   const [worktreeDialogProjectId, setWorktreeDialogProjectId] = useState<string | null>(null);
   const appView = useMemo(() => resolveAppView(), []);
   const isMonitorView = appView === "monitor";
+  const openCommandPalette = useCallback(() => {
+    if (isMonitorView || showTerminalWorkspace) {
+      return;
+    }
+    setCommandPaletteQuery("");
+    setCommandPaletteActiveIndex(0);
+    setIsCommandPaletteOpen(true);
+  }, [isMonitorView, showTerminalWorkspace]);
+  const closeCommandPalette = useCallback(() => {
+    setIsCommandPaletteOpen(false);
+    setCommandPaletteQuery("");
+    setCommandPaletteActiveIndex(0);
+  }, []);
 
   useEffect(() => {
     if (typeof document === "undefined") {
@@ -366,6 +399,43 @@ function AppLayout() {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const handleOpenCommandPalette = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== "k") {
+        return;
+      }
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) {
+        return;
+      }
+
+      const activeTarget = resolveKeyboardEventTarget(event);
+      if (activeTarget?.closest(".terminal-pane, .xterm, .xterm-helper-textarea")) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (!isCommandPaletteOpen) {
+        openCommandPalette();
+      }
+    };
+
+    window.addEventListener("keydown", handleOpenCommandPalette, true);
+    return () => {
+      window.removeEventListener("keydown", handleOpenCommandPalette, true);
+    };
+  }, [isCommandPaletteOpen, openCommandPalette]);
+
+  useEffect(() => {
+    if (isCommandPaletteOpen && (isMonitorView || showTerminalWorkspace)) {
+      closeCommandPalette();
+    }
+  }, [closeCommandPalette, isCommandPaletteOpen, isMonitorView, showTerminalWorkspace]);
+
   const searchInputRef = useRef<HTMLInputElement>(null);
   const lastTerminalVisibleRef = useRef(showTerminalWorkspace);
   const terminalOpenProjectsRef = useRef<Project[]>(terminalOpenProjects);
@@ -387,6 +457,10 @@ function AppLayout() {
   const codexEventSnapshotRef = useRef<Set<string>>(new Set());
   const recycleBinPaths = appState.recycleBin ?? [];
   const recycleBinSet = useMemo(() => new Set(recycleBinPaths), [recycleBinPaths]);
+  const favoriteProjectPathSet = useMemo(
+    () => new Set(appState.favoriteProjectPaths ?? []),
+    [appState.favoriteProjectPaths],
+  );
   const recycleBinCount = recycleBinPaths.length;
   const visibleProjects = useMemo(
     () => projects.filter((project) => !recycleBinSet.has(project.path)),
@@ -529,6 +603,11 @@ function AppLayout() {
     }
 
     result.sort((left, right) => {
+      const leftFavorite = favoriteProjectPathSet.has(left.path);
+      const rightFavorite = favoriteProjectPathSet.has(right.path);
+      if (leftFavorite !== rightFavorite) {
+        return leftFavorite ? -1 : 1;
+      }
       return right.mtime - left.mtime;
     });
 
@@ -542,6 +621,7 @@ function AppLayout() {
     dateFilter,
     gitFilter,
     hiddenTags,
+    favoriteProjectPathSet,
   ]);
 
   const selectedProject = selectedProjectId ? projectMap.get(selectedProjectId) ?? null : null;
@@ -585,6 +665,39 @@ function AppLayout() {
     setHeatmapSelectedDateKey(formatDateKey(entry.date));
   }, []);
 
+  const handleSelectDirectory = useCallback(
+    (directory: string | null) => {
+      setSelectedDirectory(directory);
+    },
+    [],
+  );
+
+  const heatmapActiveProjects = useMemo(() => {
+    if (!heatmapSelectedDateKey) {
+      return [];
+    }
+    return visibleProjects
+      .map((project) => ({
+        projectId: project.id,
+        projectName: project.name,
+        projectPath: project.path,
+        commitCount: parseGitDaily(project.git_daily)[heatmapSelectedDateKey] ?? 0,
+      }))
+      .filter((item) => item.commitCount > 0)
+      .sort((left, right) => {
+        if (left.commitCount !== right.commitCount) {
+          return right.commitCount - left.commitCount;
+        }
+        return left.projectName.localeCompare(right.projectName);
+      });
+  }, [heatmapSelectedDateKey, visibleProjects]);
+
+  const handleLocateHeatmapProject = useCallback((projectId: string) => {
+    setSelectedProjects(new Set([projectId]));
+    setSelectedProjectId(projectId);
+    setShowDetailPanel(true);
+  }, []);
+
   const handleToggleDetail = useCallback(() => {
     setShowDetailPanel((prev) => {
       const next = !prev;
@@ -597,10 +710,10 @@ function AppLayout() {
 
   const handleAssignTagToProjects = useCallback(
     async (tag: string, projectIds: string[]) => {
-      await Promise.all(projectIds.map((projectId) => addTagToProject(projectId, tag)));
+      await addTagToProjects(projectIds, tag);
       setSelectedTags(new Set());
     },
-    [addTagToProject],
+    [addTagToProjects],
   );
 
   const handleOpenTagEditor = useCallback((tag?: TagData) => {
@@ -646,6 +759,113 @@ function AppLayout() {
       }
     },
     [moveProjectToRecycleBin, showToast],
+  );
+
+  const handleClearSelectedProjects = useCallback(() => {
+    setSelectedProjects(new Set());
+    setSelectedProjectId(null);
+  }, []);
+
+  const handleBulkCopyProjectPaths = useCallback(
+    async (projectIds: string[]) => {
+      const targetPaths = Array.from(
+        new Set(
+          projectIds
+            .map((projectId) => projectMap.get(projectId)?.path ?? "")
+            .map((path) => path.trim())
+            .filter(Boolean),
+        ),
+      );
+      if (targetPaths.length === 0) {
+        showToast("未找到可复制的项目路径", "error");
+        return;
+      }
+      try {
+        await copyToClipboard(targetPaths.join("\n"));
+        showToast(`已复制 ${targetPaths.length} 个项目路径`);
+      } catch (error) {
+        console.error("批量复制路径失败。", error);
+        showToast("批量复制失败，请稍后重试", "error");
+      }
+    },
+    [projectMap, showToast],
+  );
+
+  const handleBulkRefreshProjects = useCallback(
+    async (projectIds: string[]) => {
+      const targetPaths = Array.from(
+        new Set(projectIds.map((projectId) => projectMap.get(projectId)?.path ?? "").filter(Boolean)),
+      );
+      if (targetPaths.length === 0) {
+        showToast("未找到可刷新的项目", "error");
+        return;
+      }
+      try {
+        for (const path of targetPaths) {
+          await refreshProject(path);
+        }
+        showToast(`已刷新 ${targetPaths.length} 个项目`);
+      } catch (error) {
+        console.error("批量刷新项目失败。", error);
+        showToast("批量刷新失败，请稍后重试", "error");
+      }
+    },
+    [projectMap, refreshProject, showToast],
+  );
+
+  const handleBulkMoveProjectsToRecycleBin = useCallback(
+    async (projectIds: string[]) => {
+      const targetProjectIds = Array.from(new Set(projectIds.filter((projectId) => projectMap.has(projectId))));
+      if (targetProjectIds.length === 0) {
+        showToast("未找到可移入回收站的项目", "error");
+        return;
+      }
+
+      const targetPaths = targetProjectIds
+        .map((projectId) => projectMap.get(projectId)?.path ?? "")
+        .map((path) => path.trim())
+        .filter(Boolean);
+
+      try {
+        await moveProjectsToRecycleBin(targetPaths);
+        const targetIdSet = new Set(targetProjectIds);
+        setSelectedProjects((prev) => {
+          const next = new Set(prev);
+          targetIdSet.forEach((id) => next.delete(id));
+          return next;
+        });
+        setSelectedProjectId((prev) => (prev && targetIdSet.has(prev) ? null : prev));
+        setHeatmapFilteredProjectIds((prev) => {
+          const next = new Set(prev);
+          targetIdSet.forEach((id) => next.delete(id));
+          return next;
+        });
+        showToast(`已移入回收站（${targetProjectIds.length} 个项目）`);
+      } catch (error) {
+        console.error("批量移入回收站失败。", error);
+        showToast("批量移入回收站失败，请稍后重试", "error");
+      }
+    },
+    [moveProjectsToRecycleBin, projectMap, showToast],
+  );
+
+  const handleBulkAssignTagToProjects = useCallback(
+    async (tag: string, projectIds: string[]) => {
+      const targetProjectIds = Array.from(new Set(projectIds.filter((projectId) => projectMap.has(projectId))));
+      if (targetProjectIds.length === 0) {
+        showToast("未找到可打标签的项目", "error");
+        return;
+      }
+      try {
+        await addTagToProjects(targetProjectIds, tag);
+        setSelectedTags(new Set());
+        showToast(`已为 ${targetProjectIds.length} 个项目添加标签`);
+      } catch (error) {
+        console.error("批量打标签失败。", error);
+        showToast("批量打标签失败，请稍后重试", "error");
+      }
+    },
+    [addTagToProjects, projectMap, showToast],
   );
 
   const handleRestoreProjectFromRecycleBin = useCallback(
@@ -1846,6 +2066,183 @@ function AppLayout() {
     [appState.settings, projectListViewMode, showToast, updateSettings],
   );
 
+  const commandPaletteActions = useMemo<CommandPaletteAction[]>(() => {
+    const actions: CommandPaletteAction[] = [];
+    const appendAction = (
+      id: string,
+      title: string,
+      run: () => void,
+      options?: { subtitle?: string; group?: string; keywords?: string[] },
+    ) => {
+      actions.push({
+        id,
+        title,
+        subtitle: options?.subtitle,
+        group: options?.group,
+        searchText: [title, options?.subtitle ?? "", ...(options?.keywords ?? [])].join(" ").toLowerCase(),
+        run,
+      });
+    };
+
+    appendAction(
+      "filter:clear-all",
+      "清除全部筛选",
+      () => {
+        setSelectedDirectory(null);
+        setSelectedTags(new Set());
+        setDateFilter("all");
+        setGitFilter("all");
+        setHeatmapFilteredProjectIds(new Set());
+        setHeatmapSelectedDateKey(null);
+      },
+      { group: "筛选", keywords: ["清空", "reset", "filter"] },
+    );
+
+    appendAction(
+      "filter:directory:all",
+      "筛选目录：全部",
+      () => setSelectedDirectory(null),
+      { group: "筛选", keywords: ["directory", "目录", "all"] },
+    );
+    for (const directory of appState.directories) {
+      const name = directory.split("/").filter(Boolean).pop() ?? directory;
+      appendAction(
+        `filter:directory:${directory}`,
+        `筛选目录：${name}`,
+        () => setSelectedDirectory(directory),
+        { group: "筛选", subtitle: directory, keywords: ["directory", "目录", name] },
+      );
+    }
+
+    for (const option of DATE_FILTER_OPTIONS) {
+      appendAction(
+        `filter:date:${option.value}`,
+        `日期筛选：${option.title}`,
+        () => setDateFilter(option.value),
+        { group: "筛选", keywords: ["date", "日期", option.shortLabel] },
+      );
+    }
+    for (const option of GIT_FILTER_OPTIONS) {
+      appendAction(
+        `filter:git:${option.value}`,
+        `Git 筛选：${option.title}`,
+        () => setGitFilter(option.value),
+        { group: "筛选", keywords: ["git", "筛选", option.title] },
+      );
+    }
+    for (const tag of appState.tags) {
+      if (tag.hidden) {
+        continue;
+      }
+      appendAction(
+        `filter:tag:${tag.name}`,
+        `标签筛选：${tag.name}`,
+        () => {
+          setSelectedTags(new Set([tag.name]));
+          setHeatmapFilteredProjectIds(new Set());
+          setHeatmapSelectedDateKey(null);
+        },
+        { group: "筛选", keywords: ["tag", "标签", tag.name] },
+      );
+    }
+
+    for (const project of visibleProjects) {
+      appendAction(
+        `project:focus:${project.id}`,
+        `打开项目：${project.name}`,
+        () => {
+          setSelectedProjects(new Set([project.id]));
+          setSelectedProjectId(project.id);
+          setShowDetailPanel(true);
+        },
+        { group: "项目", subtitle: project.path, keywords: ["open", "项目", project.name, project.path] },
+      );
+      appendAction(
+        `project:terminal:${project.id}`,
+        `打开终端：${project.name}`,
+        () => handleOpenTerminal(project),
+        { group: "终端", subtitle: project.path, keywords: ["terminal", "终端", project.name, project.path] },
+      );
+
+      for (const script of project.scripts ?? []) {
+        appendAction(
+          `script:run:${project.id}:${script.id}`,
+          `运行脚本：${script.name}`,
+          () => {
+            void handleRunProjectScript(project.id, script.id);
+          },
+          {
+            group: "脚本",
+            subtitle: `${project.name} · ${script.start}`,
+            keywords: ["run", "script", "脚本", script.name, project.name, script.start],
+          },
+        );
+      }
+    }
+
+    return actions;
+  }, [appState.directories, appState.tags, handleOpenTerminal, handleRunProjectScript, visibleProjects]);
+
+  const filteredCommandPaletteActions = useMemo(() => {
+    const normalizedQuery = commandPaletteQuery.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return commandPaletteActions.slice(0, 200);
+    }
+    return commandPaletteActions
+      .filter((action) => action.searchText.includes(normalizedQuery))
+      .slice(0, 200);
+  }, [commandPaletteActions, commandPaletteQuery]);
+
+  const commandPaletteItems = useMemo<CommandPaletteItem[]>(
+    () =>
+      filteredCommandPaletteActions.map((action) => ({
+        id: action.id,
+        title: action.title,
+        subtitle: action.subtitle,
+        group: action.group,
+      })),
+    [filteredCommandPaletteActions],
+  );
+
+  const commandPaletteActionById = useMemo(
+    () => new Map(filteredCommandPaletteActions.map((action) => [action.id, action])),
+    [filteredCommandPaletteActions],
+  );
+
+  useEffect(() => {
+    if (!isCommandPaletteOpen) {
+      return;
+    }
+    setCommandPaletteActiveIndex(0);
+  }, [commandPaletteQuery, isCommandPaletteOpen]);
+
+  useEffect(() => {
+    if (!isCommandPaletteOpen) {
+      return;
+    }
+    setCommandPaletteActiveIndex((prev) => {
+      if (commandPaletteItems.length === 0) {
+        return 0;
+      }
+      if (prev < 0 || prev >= commandPaletteItems.length) {
+        return 0;
+      }
+      return prev;
+    });
+  }, [commandPaletteItems.length, isCommandPaletteOpen]);
+
+  const handleSelectCommandPaletteItem = useCallback(
+    (item: CommandPaletteItem) => {
+      const action = commandPaletteActionById.get(item.id);
+      if (!action) {
+        return;
+      }
+      action.run();
+      closeCommandPalette();
+    },
+    [closeCommandPalette, commandPaletteActionById],
+  );
+
   useEffect(() => {
     if (isMonitorView) {
       return;
@@ -1925,13 +2322,15 @@ function AppLayout() {
           selectedTags={selectedTags}
           selectedDirectory={selectedDirectory}
           heatmapFilteredProjectIds={heatmapFilteredProjectIds}
+          heatmapActiveProjects={heatmapActiveProjects}
           onSelectTag={handleSelectTag}
           onClearHeatmapFilter={() => {
             setHeatmapFilteredProjectIds(new Set());
             setHeatmapSelectedDateKey(null);
           }}
           onSelectHeatmapDate={handleSelectHeatmapDate}
-          onSelectDirectory={setSelectedDirectory}
+          onLocateHeatmapProject={handleLocateHeatmapProject}
+          onSelectDirectory={handleSelectDirectory}
           onOpenTagEditor={handleOpenTagEditor}
           onToggleTagHidden={toggleTagHidden}
           onRemoveTag={removeTag}
@@ -1950,6 +2349,7 @@ function AppLayout() {
         <MainContent
           projects={visibleProjects}
           filteredProjects={filteredProjects}
+          favoriteProjectPaths={favoriteProjectPathSet}
           recycleBinCount={recycleBinCount}
           isLoading={isLoading}
           error={error}
@@ -1965,14 +2365,22 @@ function AppLayout() {
           onToggleDetailPanel={handleToggleDetail}
           onOpenDashboard={() => setShowDashboard(true)}
           onOpenSettings={() => setShowSettings(true)}
+          availableTags={appState.tags.map((tag) => tag.name)}
           selectedProjects={selectedProjects}
           onSelectProject={handleSelectProject}
+          onClearSelectedProjects={handleClearSelectedProjects}
+          onBulkCopyProjectPaths={handleBulkCopyProjectPaths}
+          onBulkRefreshProjects={handleBulkRefreshProjects}
+          onBulkMoveToRecycleBin={handleBulkMoveProjectsToRecycleBin}
+          onBulkAssignTagToProjects={handleBulkAssignTagToProjects}
           onTagSelected={handleSelectTag}
           onRemoveTagFromProject={removeTagFromProject}
           onRefreshProject={refreshProject}
           onCopyPath={handleCopyPath}
           onOpenTerminal={handleOpenTerminal}
+          onRunProjectScript={handleRunProjectScript}
           onMoveToRecycleBin={handleMoveProjectToRecycleBin}
+          onToggleFavorite={toggleProjectFavorite}
           getTagColor={getTagColor}
           searchInputRef={searchInputRef}
         />
@@ -2033,6 +2441,17 @@ function AppLayout() {
         sourceProject={worktreeDialogSourceProject}
         onClose={() => setWorktreeDialogProjectId(null)}
         onSubmit={handleCreateWorktree}
+      />
+
+      <CommandPalette
+        isOpen={isCommandPaletteOpen}
+        query={commandPaletteQuery}
+        items={commandPaletteItems}
+        activeIndex={commandPaletteActiveIndex}
+        onQueryChange={setCommandPaletteQuery}
+        onActiveIndexChange={setCommandPaletteActiveIndex}
+        onSelectItem={handleSelectCommandPaletteItem}
+        onClose={closeCommandPalette}
       />
 
       {toast ? (
