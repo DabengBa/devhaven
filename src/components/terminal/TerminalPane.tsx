@@ -15,7 +15,6 @@ import {
   listenTerminalExit,
   listenTerminalOutput,
   resizeTerminal,
-  type TerminalCodexPaneOverlay,
   writeTerminal,
 } from "../../services/terminal";
 
@@ -379,7 +378,6 @@ export type TerminalPaneProps = {
   sessionId: string;
   cwd: string;
   savedState?: string | null;
-  codexPaneOverlay?: TerminalCodexPaneOverlay | null;
   windowLabel: string;
   useWebgl: boolean;
   theme: ITheme;
@@ -394,7 +392,6 @@ export default function TerminalPane({
   sessionId,
   cwd,
   savedState,
-  codexPaneOverlay = null,
   windowLabel,
   useWebgl,
   theme,
@@ -943,13 +940,6 @@ export default function TerminalPane({
           >
             ×
           </button>
-        </div>
-      ) : null}
-      {codexPaneOverlay ? (
-        <div className="pointer-events-none absolute right-4 top-3 z-20 rounded-md border border-[var(--terminal-divider)] bg-[var(--terminal-panel-bg)]/95 px-2.5 py-1.5 text-[10px] leading-4 text-[var(--terminal-muted-fg)] shadow-md">
-          <div className="font-semibold text-[var(--terminal-fg)]">Codex</div>
-          <div className="mt-0.5 whitespace-nowrap">model: {codexPaneOverlay.model || "unknown"}</div>
-          <div className="whitespace-nowrap">effort: {codexPaneOverlay.effort || "unknown"}</div>
         </div>
       ) : null}
       <div ref={containerRef} className="min-h-0 min-w-0 flex-1" />

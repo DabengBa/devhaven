@@ -723,14 +723,3 @@ pub struct CodexMonitorSnapshot {
     pub is_codex_running: bool,
     pub updated_at: i64,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalCodexPaneOverlay {
-    pub session_id: String,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub effort: Option<String>,
-    pub updated_at: i64,
-}

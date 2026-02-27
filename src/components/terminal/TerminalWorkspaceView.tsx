@@ -20,11 +20,8 @@ import {
   stopQuickCommand as stopQuickCommandJob,
 } from "../../services/quickCommands";
 import {
-  getTerminalCodexPaneOverlay,
   killTerminal,
-  listenTerminalOutput,
   writeTerminal,
-  type TerminalCodexPaneOverlay,
 } from "../../services/terminal";
 import { saveTerminalWorkspace, loadTerminalWorkspace } from "../../services/terminalWorkspace";
 import { gitIsRepo } from "../../services/gitManagement";
@@ -67,13 +64,7 @@ type ScriptRuntime = {
 };
 
 const TERMINAL_TITLE_PATTERN = /^终端\s*(\d+)$/;
-const CODEX_STARTUP_OUTPUT_BUFFER_LIMIT = 4096;
 const QUICK_COMMAND_FORCE_KILL_TIMEOUT_MS = 1500;
-const ANSI_CSI_REGEX = /\u001b\[[0-?]*[ -/]*[@-~]/g;
-const ANSI_OSC_REGEX = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
-const CODEX_MODEL_LINE_REGEX = /model:\s*([^\s|]+)\s+([^\s|]+)\s+\/model\b/i;
-const CODEX_MODEL_CHANGED_REGEX = /model changed to\s+([^\s`]+)(?:\s+([^\s`]+))?/i;
-const CODEX_RESUME_MODEL_REGEX = /resuming with\s+`([^`]+)`/i;
 
 const DEFAULT_RIGHT_SIDEBAR: RightSidebarState = {
   open: false,
@@ -82,60 +73,10 @@ const DEFAULT_RIGHT_SIDEBAR: RightSidebarState = {
 };
 const MIN_RIGHT_SIDEBAR_WIDTH = 360;
 const MAX_RIGHT_SIDEBAR_WIDTH = 960;
-const CODEX_PANE_OVERLAY_REFRESH_INTERVAL_MS = 2500;
 const QUICK_COMMAND_RECONCILE_INTERVAL_MS = 10000;
-
-type CodexStartupHint = {
-  model: string | null;
-  effort: string | null;
-  updatedAt: number;
-};
 
 type ScriptLocalPhase = "starting" | "stoppingSoft" | "stoppingHard";
 type ScriptExecutionState = "idle" | "starting" | "running" | "stoppingSoft" | "stoppingHard";
-
-function stripAnsiSequences(input: string) {
-  return input.replace(ANSI_OSC_REGEX, "").replace(ANSI_CSI_REGEX, "");
-}
-
-function parseCodexStartupModelLine(buffer: string): Pick<CodexStartupHint, "model" | "effort"> | null {
-  const lines = stripAnsiSequences(buffer).split(/\r?\n/);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const normalized = lines[index].replace(/[│┃]/g, " ").replace(/\s+/g, " ").trim();
-    if (!normalized) {
-      continue;
-    }
-
-    const modelChangedMatched = normalized.match(CODEX_MODEL_CHANGED_REGEX);
-    if (modelChangedMatched) {
-      return {
-        model: modelChangedMatched[1]?.trim() || null,
-        effort: modelChangedMatched[2]?.trim() || null,
-      };
-    }
-
-    const resumeModelMatched = normalized.match(CODEX_RESUME_MODEL_REGEX);
-    if (resumeModelMatched) {
-      return {
-        model: resumeModelMatched[1]?.trim() || null,
-        effort: null,
-      };
-    }
-
-    if (!normalized.toLowerCase().includes("model:")) {
-      continue;
-    }
-    const startupModelMatched = normalized.match(CODEX_MODEL_LINE_REGEX);
-    if (!startupModelMatched) {
-      continue;
-    }
-    return {
-      model: startupModelMatched[1]?.trim() || null,
-      effort: startupModelMatched[2]?.trim() || null,
-    };
-  }
-  return null;
-}
 
 function shellQuote(value: string) {
   // POSIX-safe single-quote escaping: 'foo'"'"'bar'
@@ -264,7 +205,6 @@ export default function TerminalWorkspaceView({
   const pendingStartBySessionIdRef = useRef(new Map<string, string>());
   const pendingStopAfterStartByScriptIdRef = useRef(new Set<string>());
   const finalizedQuickCommandJobIdsRef = useRef(new Set<string>());
-  const codexStartupOutputBufferBySessionIdRef = useRef(new Map<string, string>());
   const handledDispatchSeqRef = useRef(0);
   const stopKillTimerByScriptIdRef = useRef(new Map<string, number>());
   const pendingQuickCommandDispatchRef = useRef<TerminalQuickCommandDispatch | null>(null);
@@ -276,12 +216,6 @@ export default function TerminalWorkspaceView({
   const [previewFilePath, setPreviewFilePath] = useState<string | null>(null);
   const [previewDirty, setPreviewDirty] = useState(false);
   const [isGitRepo, setIsGitRepo] = useState(false);
-  const [codexPaneOverlayBySessionId, setCodexPaneOverlayBySessionId] = useState<
-    Record<string, TerminalCodexPaneOverlay>
-  >({});
-  const [codexStartupHintBySessionId, setCodexStartupHintBySessionId] = useState<
-    Record<string, CodexStartupHint>
-  >({});
   const dragStateRef = useRef<{
     startClientX: number;
     startClientY: number;
@@ -361,7 +295,6 @@ export default function TerminalWorkspaceView({
     pendingStartBySessionIdRef.current.clear();
     pendingStopAfterStartByScriptIdRef.current.clear();
     finalizedQuickCommandJobIdsRef.current.clear();
-    codexStartupOutputBufferBySessionIdRef.current.clear();
     handledDispatchSeqRef.current = 0;
     pendingQuickCommandDispatchRef.current = null;
     for (const timer of stopKillTimerByScriptIdRef.current.values()) {
@@ -370,8 +303,6 @@ export default function TerminalWorkspaceView({
     stopKillTimerByScriptIdRef.current.clear();
     setPreviewFilePath(null);
     setPreviewDirty(false);
-    setCodexPaneOverlayBySessionId({});
-    setCodexStartupHintBySessionId({});
     loadTerminalWorkspace(projectPath)
       .then((data) => {
         if (cancelled) {
@@ -608,38 +539,9 @@ export default function TerminalWorkspaceView({
       sessionPtyIdRef.current.delete(sessionId);
       scriptIdBySessionIdRef.current.delete(sessionId);
       pendingStartBySessionIdRef.current.delete(sessionId);
-      codexStartupOutputBufferBySessionIdRef.current.delete(sessionId);
     });
 
     clearScriptLocalPhase(removedScriptIds);
-
-    setCodexStartupHintBySessionId((prev) => {
-      let next: Record<string, CodexStartupHint> | null = null;
-      for (const sessionId of sessionIds) {
-        if (!(sessionId in prev)) {
-          continue;
-        }
-        if (!next) {
-          next = { ...prev };
-        }
-        delete next[sessionId];
-      }
-      return next ?? prev;
-    });
-
-    setCodexPaneOverlayBySessionId((prev) => {
-      let next: Record<string, TerminalCodexPaneOverlay> | null = null;
-      for (const sessionId of sessionIds) {
-        if (!(sessionId in prev)) {
-          continue;
-        }
-        if (!next) {
-          next = { ...prev };
-        }
-        delete next[sessionId];
-      }
-      return next ?? prev;
-    });
   }, [clearScriptLocalPhase]);
 
   useEffect(() => {
@@ -648,54 +550,6 @@ export default function TerminalWorkspaceView({
       finalizeRuntimeBySessionIds(runtimeSessionIds, 130, "终端会话已关闭");
     };
   }, [finalizeRuntimeBySessionIds, projectId, projectPath]);
-
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-
-    const registerListener = async () => {
-      try {
-        unlisten = await listenTerminalOutput((event) => {
-          const payload = event.payload;
-          const sessionId = payload.sessionId;
-
-          const startupBufferMap = codexStartupOutputBufferBySessionIdRef.current;
-          const startupPrev = startupBufferMap.get(sessionId) ?? "";
-          const startupNext = `${startupPrev}${payload.data}`.slice(-CODEX_STARTUP_OUTPUT_BUFFER_LIMIT);
-          startupBufferMap.set(sessionId, startupNext);
-
-          const startupHint = parseCodexStartupModelLine(startupNext);
-          if (startupHint) {
-            const now = Date.now();
-            setCodexStartupHintBySessionId((prev) => {
-              const existing = prev[sessionId];
-              const nextModel = startupHint.model ?? existing?.model ?? null;
-              const nextEffort = startupHint.effort ?? existing?.effort ?? null;
-              if (existing && existing.model === nextModel && existing.effort === nextEffort) {
-                return prev;
-              }
-              return {
-                ...prev,
-                [sessionId]: {
-                  model: nextModel,
-                  effort: nextEffort,
-                  updatedAt: now,
-                },
-              };
-            });
-          }
-
-        });
-      } catch (error) {
-        console.error("监听终端输出事件失败。", error);
-      }
-    };
-
-    void registerListener();
-
-    return () => {
-      unlisten?.();
-    };
-  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -1657,56 +1511,6 @@ export default function TerminalWorkspaceView({
     handleQuickCommandDispatch(pending);
   }, [handleQuickCommandDispatch, workspace]);
 
-  useEffect(() => {
-    if (!workspace || !isActive) {
-      setCodexPaneOverlayBySessionId({});
-      return;
-    }
-
-    const sessionIds = Object.keys(workspace.sessions ?? {});
-    if (sessionIds.length === 0) {
-      setCodexPaneOverlayBySessionId({});
-      return;
-    }
-
-    let cancelled = false;
-
-    const refreshOverlay = async () => {
-      if (document.visibilityState === "hidden") {
-        return;
-      }
-
-      try {
-        const items = await getTerminalCodexPaneOverlay(windowLabel, sessionIds);
-        if (cancelled) {
-          return;
-        }
-        const next: Record<string, TerminalCodexPaneOverlay> = {};
-        for (const item of items ?? []) {
-          if (!item?.sessionId) {
-            continue;
-          }
-          next[item.sessionId] = item;
-        }
-        setCodexPaneOverlayBySessionId(next);
-      } catch {
-        if (!cancelled) {
-          setCodexPaneOverlayBySessionId({});
-        }
-      }
-    };
-
-    void refreshOverlay();
-    const timer = window.setInterval(() => {
-      void refreshOverlay();
-    }, CODEX_PANE_OVERLAY_REFRESH_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [isActive, windowLabel, workspace]);
-
   if (!projectPath) {
     return (
       <div className="flex h-full items-center justify-center text-[var(--terminal-muted-fg)]">
@@ -1932,21 +1736,6 @@ export default function TerminalWorkspaceView({
                       sessionId={sessionId}
                       cwd={workspace.sessions[sessionId]?.cwd ?? workspace.projectPath}
                       savedState={workspace.sessions[sessionId]?.savedState ?? null}
-                      codexPaneOverlay={(() => {
-                        const backendOverlay = codexPaneOverlayBySessionId[sessionId] ?? null;
-                        if (!backendOverlay) {
-                          return null;
-                        }
-                        const startupHint = codexStartupHintBySessionId[sessionId] ?? null;
-                        if (!startupHint) {
-                          return backendOverlay;
-                        }
-                        return {
-                          ...backendOverlay,
-                          model: startupHint.model ?? backendOverlay.model,
-                          effort: startupHint.effort ?? backendOverlay.effort,
-                        };
-                      })()}
                       windowLabel={windowLabel}
                       // 仅对当前激活 Tab 启用 WebGL 渲染，避免创建过多 WebGL contexts（浏览器有上限）。
                       useWebgl={appState.settings.terminalUseWebglRenderer && tab.id === workspace.activeTabId}

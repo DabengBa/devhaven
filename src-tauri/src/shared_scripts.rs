@@ -13,7 +13,7 @@ use crate::models::{
 const DEFAULT_SHARED_SCRIPTS_ROOT: &str = "~/.devhaven/scripts";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const DEFAULT_COMMAND_TEMPLATE: &str = "bash \"${scriptPath}\"";
-const BUILTIN_PRESET_VERSION: &str = "2026.02.3";
+const BUILTIN_PRESET_VERSION: &str = "2026.02.4";
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -404,26 +404,689 @@ python3 "${scriptPath}" --jenkins-url "${host}" --username "${username}" --job "
                 ],
             },
             file_content: r#"#!/usr/bin/env python3
-"""Jenkins 部署脚本占位模板。"""
+"""统一 Jenkins 构建触发脚本：支持工程选择、参数填写、实时日志。"""
 
 import argparse
+import base64
+import getpass
+import json
 import os
+import shutil
+import subprocess
 import sys
+import time
+from urllib import error, parse, request
+
+try:
+    import readline
+except ImportError:
+    readline = None
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Jenkins 部署占位脚本")
-    parser.add_argument("--jenkins-url", required=True)
-    parser.add_argument("--username", required=True)
-    parser.add_argument("--job", required=True)
-    args = parser.parse_args()
+def parse_json(body, context):
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:
+        snippet = body[:300].replace("\n", " ")
+        raise RuntimeError(f"{context} 返回非 JSON: {snippet}") from exc
 
-    password = os.environ.get("JENKINS_PASSWORD")
-    masked = "***" if password else "(未提供)"
-    print("Jenkins 部署脚本尚未替换为真实实现。")
-    print(f"url={args.jenkins_url}, username={args.username}, job={args.job}, password={masked}")
-    print("请将真实脚本内容写入 ~/.devhaven/scripts/jenkins-depoly")
-    return 1
+
+def input_with_completion(prompt_text, options):
+    """为交互输入增加 Tab 自动补全；不支持 readline 时自动降级。"""
+    if readline is None or not options:
+        return input(prompt_text).strip()
+
+    candidates = sorted({str(item) for item in options}, key=str.lower)
+
+    def completer(text, state):
+        text_lower = text.lower()
+        matches = [item for item in candidates if text_lower in item.lower()]
+        if state < len(matches):
+            return matches[state]
+        return None
+
+    old_completer = readline.get_completer()
+    old_delims = readline.get_completer_delims()
+    try:
+        readline.set_completer(completer)
+        # 分支名常含 "/"，这里移除分隔符避免补全被截断。
+        readline.set_completer_delims(old_delims.replace("/", ""))
+        readline.parse_and_bind("tab: complete")
+        return input(prompt_text).strip()
+    finally:
+        readline.set_completer(old_completer)
+        readline.set_completer_delims(old_delims)
+
+
+def can_use_fzf():
+    return bool(shutil.which("fzf")) and sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def fzf_select(options, prompt_text, header=None, query=None):
+    """使用 fzf 做交互筛选；返回选中值，取消时返回 None。"""
+    if not options or not can_use_fzf():
+        return None
+
+    cmd = [
+        "fzf",
+        "--height=70%",
+        "--layout=reverse",
+        "--border",
+        "--prompt",
+        prompt_text,
+        "--select-1",
+        "--exit-0",
+    ]
+    if header:
+        cmd.extend(["--header", header])
+    if query:
+        cmd.extend(["--query", str(query)])
+
+    proc = subprocess.run(
+        cmd,
+        input="\n".join(str(item) for item in options) + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    selected = proc.stdout.strip().splitlines()
+    return selected[0] if selected else None
+
+
+def resolve_ui_mode(ui_mode):
+    if ui_mode == "plain":
+        return False
+    if ui_mode == "fzf":
+        if not can_use_fzf():
+            raise RuntimeError("指定了 --ui fzf，但当前环境不可用（请安装 fzf 并在交互终端运行）")
+        return True
+    return can_use_fzf()
+
+
+class JenkinsClient:
+    def __init__(self, base_url, username, password, timeout=30):
+        self.base_url = base_url.rstrip("/")
+        self.base_parsed = parse.urlparse(self.base_url)
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        self.auth_header = f"Basic {token}"
+        self.timeout = timeout
+        self.crumb = None
+
+    def _full_url(self, path_or_url):
+        if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+            return path_or_url
+        return parse.urljoin(self.base_url + "/", path_or_url.lstrip("/"))
+
+    def request(self, path_or_url, method="GET", data=None, headers=None):
+        req_headers = {"Authorization": self.auth_header}
+        if self.crumb and method.upper() in ("POST", "PUT", "PATCH", "DELETE"):
+            req_headers[self.crumb[0]] = self.crumb[1]
+        if headers:
+            req_headers.update(headers)
+
+        req = request.Request(
+            url=self._full_url(path_or_url),
+            data=data,
+            headers=req_headers,
+            method=method.upper(),
+        )
+        try:
+            with request.urlopen(req, timeout=self.timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                resp_headers = {k.lower(): v for k, v in resp.headers.items()}
+                return resp.status, resp_headers, body
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            err_headers = {k.lower(): v for k, v in (exc.headers.items() if exc.headers else [])}
+            return exc.code, err_headers, body
+
+    def canonicalize_url(self, path_or_url):
+        """强制使用用户传入 Jenkins 地址的协议和主机，避免 Jenkins Root URL 配置错位。"""
+        full_url = self._full_url(path_or_url)
+        parsed = parse.urlparse(full_url)
+        return parse.urlunparse(
+            (
+                self.base_parsed.scheme,
+                self.base_parsed.netloc,
+                parsed.path or "/",
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+
+    def request_json(self, path_or_url, context="请求"):
+        status, _, body = self.request(path_or_url)
+        if status != 200:
+            raise RuntimeError(f"{context}失败 HTTP {status}: {body[:300]}")
+        return parse_json(body, context)
+
+    def init_crumb(self):
+        status, _, body = self.request("/crumbIssuer/api/json")
+        if status == 200:
+            data = parse_json(body, "获取 crumb")
+            field = data.get("crumbRequestField")
+            crumb = data.get("crumb")
+            if field and crumb:
+                self.crumb = (field, crumb)
+            return
+        if status in (403, 404):
+            self.crumb = None
+            return
+        raise RuntimeError(f"获取 crumb 失败 HTTP {status}: {body[:300]}")
+
+    def list_jobs(self):
+        jobs = []
+
+        def walk(api_url, prefix):
+            data = self.request_json(api_url, context="读取工程列表")
+            for item in data.get("jobs", []):
+                name = item.get("name")
+                url = item.get("url")
+                cls = (item.get("_class") or "").lower()
+                if not name or not url:
+                    continue
+
+                is_container = ("folder" in cls) or ("multibranch" in cls)
+                if is_container:
+                    child_api = parse.urljoin(url, "api/json?tree=jobs[name,url,_class]")
+                    child_api = self.canonicalize_url(child_api)
+                    walk(child_api, prefix + name + "/")
+                    continue
+                canonical = self.canonicalize_url(url).rstrip("/") + "/"
+                jobs.append({"name": prefix + name, "url": canonical})
+
+        walk("/api/json?tree=jobs[name,url,_class]", "")
+        jobs.sort(key=lambda item: item["name"].lower())
+        return jobs
+
+
+def job_ref_to_url(base_url, job_ref):
+    ref = (job_ref or "").strip()
+    if not ref:
+        raise ValueError("job 不能为空")
+
+    if ref.startswith("http://") or ref.startswith("https://"):
+        return ref.rstrip("/") + "/"
+
+    if "/job/" in ref:
+        path = ref.strip("/")
+        if not path.startswith("job/"):
+            path = "job/" + path
+        return parse.urljoin(base_url.rstrip("/") + "/", path + "/")
+
+    parts = [part for part in ref.strip("/").split("/") if part]
+    if not parts:
+        raise ValueError("job 格式非法")
+    path = "/".join(f"job/{parse.quote(part, safe='')}" for part in parts)
+    return parse.urljoin(base_url.rstrip("/") + "/", path + "/")
+
+
+def select_job(client, job_arg, non_interactive, use_fzf):
+    if job_arg:
+        job_url = job_ref_to_url(client.base_url, job_arg)
+        data = client.request_json(job_url + "api/json?tree=name,fullName,url", context="读取工程信息")
+        display_name = data.get("fullName") or data.get("name") or job_arg
+        job_url = client.canonicalize_url(data.get("url") or job_url).rstrip("/") + "/"
+        return display_name, job_url
+
+    if non_interactive:
+        raise RuntimeError("非交互模式必须使用 --job 指定工程")
+
+    all_jobs = client.list_jobs()
+    if not all_jobs:
+        raise RuntimeError("未发现可用工程")
+
+    if use_fzf:
+        selected_name = fzf_select(
+            [item["name"] for item in all_jobs],
+            prompt_text="工程> ",
+            header="输入即过滤；回车确认；可鼠标点击定位",
+        )
+        if selected_name:
+            chosen = next(item for item in all_jobs if item["name"] == selected_name)
+            return chosen["name"], chosen["url"]
+        print("已退出 fzf 选择，降级到文本交互模式。")
+
+    current = all_jobs
+    while True:
+        print("\n可选工程（支持 Tab 补全）:")
+        for item in current[:20]:
+            print(f"  - {item['name']}")
+        if len(current) > 20:
+            print(f"  ... 当前匹配 {len(current)} 个，请继续输入关键字缩小范围")
+
+        raw = input_with_completion(
+            "输入工程名（支持关键字过滤，回车在仅剩1项时确认）: ",
+            [item["name"] for item in all_jobs],
+        )
+        if not raw:
+            if len(current) == 1:
+                chosen = current[0]
+                return chosen["name"], chosen["url"]
+            print("当前匹配不唯一，请继续输入关键字")
+            continue
+
+        exact = next((item for item in all_jobs if item["name"] == raw), None)
+        if exact is None:
+            exact = next((item for item in all_jobs if item["name"].lower() == raw.lower()), None)
+        if exact:
+            return exact["name"], exact["url"]
+
+        filtered = [item for item in all_jobs if raw.lower() in item["name"].lower()]
+        if not filtered:
+            print("没有匹配工程，请重试")
+            current = all_jobs
+            continue
+        if len(filtered) == 1:
+            chosen = filtered[0]
+            return chosen["name"], chosen["url"]
+        print(f"匹配到 {len(filtered)} 个工程，请继续输入更精确关键字")
+        current = filtered
+
+
+def get_param_definitions(client, job_url):
+    api_url = (
+        job_url
+        + "api/json?tree=actions[parameterDefinitions[name,description,type,defaultParameterValue[value],choices,_class]]"
+    )
+    data = client.request_json(api_url, context="读取参数定义")
+
+    params = []
+    seen = set()
+    for action in data.get("actions") or []:
+        # Jenkins actions 里可能混入 null，必须先做类型保护。
+        if not isinstance(action, dict):
+            continue
+
+        raw_definitions = action.get("parameterDefinitions") or []
+        if isinstance(raw_definitions, dict):
+            definitions = [raw_definitions]
+        elif isinstance(raw_definitions, list):
+            definitions = raw_definitions
+        else:
+            continue
+
+        for definition in definitions:
+            if not isinstance(definition, dict):
+                continue
+            name = definition.get("name")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+
+            ptype = definition.get("type") or (definition.get("_class", "").split(".")[-1])
+            default = None
+            if isinstance(definition.get("defaultParameterValue"), dict):
+                default = definition["defaultParameterValue"].get("value")
+            choices = definition.get("choices")
+            if isinstance(choices, list):
+                choices = [str(item) for item in choices]
+            else:
+                choices = None
+
+            params.append(
+                {
+                    "name": name,
+                    "type": ptype or "",
+                    "class_name": definition.get("_class") or "",
+                    "description": definition.get("description") or "",
+                    "default": default,
+                    "choices": choices,
+                }
+            )
+
+    enrich_git_parameter_choices(client, job_url, params)
+    return params
+
+
+def enrich_git_parameter_choices(client, job_url, params):
+    """补全 Git Parameter 插件的可选项（如分支/标签），让终端也能下拉选择。"""
+    endpoint = (
+        job_url
+        + "descriptorByName/net.uaznia.lukanus.hudson.plugins.gitparameter.GitParameterDefinition/fillValueItems"
+    )
+
+    for param in params:
+        is_git_param = (
+            "gitparameter" in (param.get("class_name") or "").lower()
+            or (param.get("type") or "").startswith("PT_")
+        )
+        if not is_git_param:
+            continue
+        if param.get("choices"):
+            continue
+
+        try:
+            query = parse.urlencode({"param": param["name"]})
+            data = client.request_json(endpoint + "?" + query, context=f"读取 {param['name']} 可选项")
+            values = data.get("values") or []
+            parsed_choices = []
+            selected_default = None
+            for item in values:
+                value = str(item.get("value", "")).strip()
+                if not value:
+                    continue
+                parsed_choices.append(value)
+                if item.get("selected"):
+                    selected_default = value
+            if parsed_choices:
+                param["choices"] = parsed_choices
+                if selected_default is not None:
+                    param["default"] = selected_default
+        except Exception:
+            # 动态拉取失败时降级为文本输入，避免影响整个构建流程。
+            continue
+
+
+def parse_param_overrides(items):
+    params = {}
+    for item in items or []:
+        if "=" not in item:
+            raise ValueError(f"参数格式错误: {item}，应为 key=value")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"参数 key 不能为空: {item}")
+        params[key] = value
+    return params
+
+
+def is_boolean_type(param_type):
+    return "boolean" in (param_type or "").lower()
+
+
+def to_bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def parse_bool(raw):
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "y", "on"):
+        return "true"
+    if value in ("0", "false", "no", "n", "off"):
+        return "false"
+    return None
+
+
+def prompt_param_value(param, use_fzf):
+    name = param["name"]
+    description = f" - {param['description']}" if param["description"] else ""
+    param_type = param["type"]
+    default = param["default"]
+    choices = param["choices"]
+
+    print(f"\n参数 {name}{description}")
+
+    if choices:
+        if use_fzf:
+            selected = fzf_select(
+                choices,
+                prompt_text=f"{name}> ",
+                header="输入即过滤；回车确认；可鼠标点击定位",
+                query=default if default is not None else None,
+            )
+            if selected:
+                return str(selected)
+            print("已退出 fzf 选择，降级到文本输入模式。")
+
+        current_choices = choices
+        while True:
+            preview = ", ".join(current_choices[:8])
+            if len(current_choices) > 8:
+                preview += f" ...（共 {len(current_choices)} 项）"
+            print(f"可选值: {preview}")
+
+            if default is not None:
+                prompt_text = f"请输入值（支持关键字/Tab 补全，回车默认 {default}）: "
+            else:
+                prompt_text = "请输入值（支持关键字/Tab 补全，回车在仅剩1项时确认）: "
+            raw = input_with_completion(prompt_text, choices)
+
+            if not raw:
+                if default is not None:
+                    return str(default)
+                if len(current_choices) == 1:
+                    return str(current_choices[0])
+                print("当前匹配不唯一，请继续输入关键字")
+                continue
+
+            exact = next((item for item in choices if item == raw), None)
+            if exact is None:
+                exact = next((item for item in choices if str(item).lower() == raw.lower()), None)
+            if exact is not None:
+                return str(exact)
+
+            filtered = [item for item in choices if raw.lower() in str(item).lower()]
+            if not filtered:
+                print("没有匹配值，请重试")
+                current_choices = choices
+                continue
+            if len(filtered) == 1:
+                return str(filtered[0])
+            print(f"匹配到 {len(filtered)} 个值，请继续输入更精确关键字")
+            current_choices = filtered
+
+    if is_boolean_type(param_type):
+        default_bool = to_bool(default)
+        hint = "Y/n" if default_bool else "y/N"
+        while True:
+            raw = input(f"输入布尔值 [{hint}]: ").strip()
+            if not raw:
+                return "true" if default_bool else "false"
+            parsed = parse_bool(raw)
+            if parsed is not None:
+                return parsed
+            print("请输入 y/n/true/false")
+
+    if "password" in (param_type or "").lower():
+        value = getpass.getpass("请输入（回车使用默认）: ")
+        if value == "" and default is not None:
+            return str(default)
+        return value
+
+    if default is not None:
+        raw = input(f"请输入（默认: {default}）: ").strip()
+        return str(default) if raw == "" else raw
+
+    return input("请输入: ").strip()
+
+
+def collect_params(param_defs, overrides, non_interactive, use_fzf):
+    params = {}
+    consumed = set()
+
+    for param in param_defs:
+        name = param["name"]
+        if name in overrides:
+            params[name] = overrides[name]
+            consumed.add(name)
+            continue
+
+        if non_interactive:
+            if param["default"] is None:
+                raise RuntimeError(f"参数 {name} 缺失，请使用 --param {name}=... 指定")
+            params[name] = "true" if is_boolean_type(param["type"]) and to_bool(param["default"]) else str(param["default"])
+            continue
+
+        params[name] = prompt_param_value(param, use_fzf)
+
+    for key, value in overrides.items():
+        if key not in consumed and key not in params:
+            params[key] = value
+
+    return params
+
+
+def should_mask(key):
+    lowered = key.lower()
+    return any(token in lowered for token in ("password", "token", "secret", "key"))
+
+
+def trigger_build(client, job_url, params):
+    if params:
+        endpoint = job_url + "buildWithParameters"
+        data = parse.urlencode(params).encode("utf-8")
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    else:
+        endpoint = job_url + "build"
+        data = None
+        headers = None
+
+    status, resp_headers, body = client.request(endpoint, method="POST", data=data, headers=headers)
+    if status not in (200, 201, 202):
+        raise RuntimeError(f"触发构建失败 HTTP {status}: {body[:400]}")
+
+    queue_url = resp_headers.get("location")
+    if not queue_url:
+        raise RuntimeError("触发成功但没有返回队列地址（Location 头缺失）")
+
+    queue_url = client.canonicalize_url(queue_url).rstrip("/") + "/"
+    return queue_url
+
+
+def wait_for_build_start(client, queue_url, job_url, timeout_sec, poll_sec):
+    deadline = time.time() + timeout_sec
+    last_reason = None
+
+    while time.time() < deadline:
+        queue = client.request_json(
+            queue_url + "api/json?tree=why,cancelled,executable[number,url]",
+            context="查询队列",
+        )
+        if queue.get("cancelled"):
+            raise RuntimeError(f"队列任务已取消: {queue.get('why') or 'unknown'}")
+
+        executable = queue.get("executable")
+        if executable and executable.get("number") is not None:
+            number = int(executable["number"])
+            raw_url = executable.get("url")
+            if raw_url:
+                build_url = client.canonicalize_url(raw_url).rstrip("/") + "/"
+            else:
+                build_url = parse.urljoin(job_url.rstrip("/") + "/", f"{number}/")
+            return number, build_url
+
+        reason = queue.get("why")
+        if reason and reason != last_reason:
+            print(f"队列中: {reason}")
+            last_reason = reason
+
+        time.sleep(poll_sec)
+
+    raise TimeoutError("等待构建开始超时")
+
+
+def stream_logs(client, build_url, timeout_sec, poll_sec):
+    deadline = time.time() + timeout_sec
+    offset = 0
+    result = "UNKNOWN"
+
+    while time.time() < deadline:
+        status, headers, text = client.request(f"{build_url}logText/progressiveText?start={offset}")
+        more_data = False
+        if status == 200:
+            if text:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+            try:
+                offset = int(headers.get("x-text-size", str(offset)))
+            except ValueError:
+                pass
+            more_data = headers.get("x-more-data", "false").lower() == "true"
+
+        info = client.request_json(build_url + "api/json?tree=building,result", context="查询构建状态")
+        building = bool(info.get("building"))
+        if info.get("result"):
+            result = info["result"]
+
+        if not building and not more_data:
+            return result
+        time.sleep(poll_sec)
+
+    raise TimeoutError("实时日志拉取超时")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Jenkins 统一触发脚本（工程选择 + 参数填写 + 实时日志）")
+    parser.add_argument("--jenkins-url", required=True, help="例如: http://192.168.0.28:8081/")
+    parser.add_argument("--username", required=True, help="Jenkins 用户名")
+    parser.add_argument("--password", default=None, help="Jenkins 密码（建议使用 JENKINS_PASSWORD）")
+    parser.add_argument("--job", help="工程名称/路径/URL（不传则交互选择）")
+    parser.add_argument("--param", action="append", default=[], help="参数 key=value，可重复")
+    parser.add_argument("--list-jobs", action="store_true", help="仅列出工程并退出")
+    parser.add_argument("--non-interactive", action="store_true", help="强制非交互模式")
+    parser.add_argument("--timeout", type=int, default=1800, help="总超时秒数，默认 1800")
+    parser.add_argument("--poll", type=float, default=2.0, help="轮询间隔秒，默认 2")
+    parser.add_argument("--http-timeout", type=int, default=30, help="单次 HTTP 超时秒数，默认 30")
+    parser.add_argument(
+        "--ui",
+        choices=("auto", "fzf", "plain"),
+        default="auto",
+        help="交互模式：auto(自动), fzf(强制 fzf), plain(纯文本)",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    use_fzf = resolve_ui_mode(args.ui)
+    password = args.password or os.environ.get("JENKINS_PASSWORD")
+    if not password:
+        if args.non_interactive:
+            print("非交互模式缺少密码，请传 --password 或设置 JENKINS_PASSWORD", file=sys.stderr)
+            return 2
+        password = getpass.getpass("请输入 Jenkins 密码: ")
+    if not password:
+        print("密码不能为空", file=sys.stderr)
+        return 2
+
+    overrides = parse_param_overrides(args.param)
+
+    client = JenkinsClient(
+        base_url=args.jenkins_url,
+        username=args.username,
+        password=password,
+        timeout=max(5, args.http_timeout),
+    )
+    client.init_crumb()
+
+    if args.list_jobs:
+        for item in client.list_jobs():
+            print(item["name"])
+        return 0
+
+    job_name, job_url = select_job(client, args.job, args.non_interactive, use_fzf)
+    print(f"目标工程: {job_name}")
+
+    param_defs = get_param_definitions(client, job_url)
+    if param_defs:
+        print("检测到参数: " + ", ".join(param["name"] for param in param_defs))
+    else:
+        print("该工程未声明参数")
+
+    params = collect_params(param_defs, overrides, args.non_interactive, use_fzf)
+    if params:
+        print("本次参数:")
+        for key, value in params.items():
+            display_value = "***" if should_mask(key) else value
+            print(f"  - {key}={display_value}")
+
+    queue_url = trigger_build(client, job_url, params)
+    print(f"已触发构建，队列地址: {queue_url}")
+
+    build_number, build_url = wait_for_build_start(client, queue_url, job_url, args.timeout, args.poll)
+    print(f"构建开始: #{build_number} {build_url}")
+    print("-" * 80)
+
+    result = stream_logs(client, build_url, args.timeout, args.poll)
+    print("\n" + "-" * 80)
+    print(f"构建结果: {result}")
+    return 0 if result == "SUCCESS" else 1
 
 
 if __name__ == "__main__":

@@ -31,10 +31,10 @@ use crate::models::{
     GitWorktreeAddResult, GitWorktreeListItem, GlobalSkillInstallRequest, GlobalSkillInstallResult,
     GlobalSkillUninstallRequest, GlobalSkillsSnapshot, HeatmapCacheFile, InteractionLockPayload,
     MarkdownFileEntry, Project, ProjectNotesPreview, SharedScriptEntry, SharedScriptManifestScript,
-    SharedScriptPresetRestoreResult, TerminalCodexPaneOverlay, TerminalWorkspace,
-    TerminalWorkspaceSummary, WorktreeInitCancelResult, WorktreeInitCreateBlockingResult,
-    WorktreeInitJobStatus, WorktreeInitRetryRequest, WorktreeInitStartRequest,
-    WorktreeInitStartResult, WorktreeInitStatusQuery, WorktreeInitStep,
+    SharedScriptPresetRestoreResult, TerminalWorkspace, TerminalWorkspaceSummary,
+    WorktreeInitCancelResult, WorktreeInitCreateBlockingResult, WorktreeInitJobStatus,
+    WorktreeInitRetryRequest, WorktreeInitStartRequest, WorktreeInitStartResult,
+    WorktreeInitStatusQuery, WorktreeInitStep,
 };
 use crate::quick_command_manager::{
     QuickCommandManager, quick_command_finish, quick_command_list, quick_command_snapshot,
@@ -42,8 +42,7 @@ use crate::quick_command_manager::{
 };
 use crate::system::EditorOpenParams;
 use crate::terminal::{
-    TerminalState, terminal_create_session, terminal_get_codex_pane_overlay, terminal_kill,
-    terminal_resize, terminal_write,
+    TerminalState, terminal_create_session, terminal_kill, terminal_resize, terminal_write,
 };
 
 const INTERACTION_LOCK_REASON_WORKTREE_CREATE: &str = "worktree-create";
@@ -759,18 +758,6 @@ fn get_codex_monitor_snapshot(app: AppHandle) -> Result<CodexMonitorSnapshot, St
     })
 }
 
-#[tauri::command]
-fn get_terminal_codex_pane_overlay(
-    app: AppHandle,
-    state: State<TerminalState>,
-    window_label: String,
-    session_ids: Vec<String>,
-) -> Result<Vec<TerminalCodexPaneOverlay>, String> {
-    log_command_result("get_terminal_codex_pane_overlay", || {
-        terminal_get_codex_pane_overlay(app, state, window_label, session_ids)
-    })
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// 启动 Tauri 应用。
 pub fn run() {
@@ -873,7 +860,6 @@ pub fn run() {
             delete_terminal_workspace,
             list_terminal_workspace_summaries,
             get_codex_monitor_snapshot,
-            get_terminal_codex_pane_overlay,
             quick_command_start,
             quick_command_stop,
             quick_command_finish,

@@ -25,13 +25,6 @@ export type TerminalExitPayload = {
   code?: number | null;
 };
 
-export type TerminalCodexPaneOverlay = {
-  sessionId: string;
-  model: string | null;
-  effort: string | null;
-  updatedAt: number;
-};
-
 export async function createTerminalSession(request: TerminalCreateRequest): Promise<TerminalCreateResult> {
   return invoke<TerminalCreateResult>("terminal_create_session", request);
 }
@@ -46,16 +39,6 @@ export async function resizeTerminal(ptyId: string, cols: number, rows: number):
 
 export async function killTerminal(ptyId: string): Promise<void> {
   await invoke("terminal_kill", { ptyId });
-}
-
-export async function getTerminalCodexPaneOverlay(
-  windowLabel: string,
-  sessionIds: string[],
-): Promise<TerminalCodexPaneOverlay[]> {
-  return invoke<TerminalCodexPaneOverlay[]>("get_terminal_codex_pane_overlay", {
-    windowLabel,
-    sessionIds,
-  });
 }
 
 export async function listenTerminalOutput(
