@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type {
   ScriptParamField,
@@ -9,6 +9,7 @@ import type {
 import {
   listSharedScripts,
   readSharedScriptFile,
+  restoreSharedScriptPresets,
   saveSharedScriptsManifest,
   writeSharedScriptFile,
 } from "../services/sharedScripts";
@@ -38,6 +39,7 @@ export default function SharedScriptsManagerModal({
   const [selectedScriptKey, setSelectedScriptKey] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isSavingManifest, setIsSavingManifest] = useState(false);
+  const [isRestoringPresets, setIsRestoringPresets] = useState(false);
   const [manifestError, setManifestError] = useState<string | null>(null);
   const [manifestMessage, setManifestMessage] = useState<string | null>(null);
   const draftKeyRef = useRef(0);
@@ -49,10 +51,10 @@ export default function SharedScriptsManagerModal({
   const [scriptContentMessage, setScriptContentMessage] = useState<string | null>(null);
   const [scriptContentError, setScriptContentError] = useState<string | null>(null);
 
-  const nextDraftKey = () => {
+  const nextDraftKey = useCallback(() => {
     draftKeyRef.current += 1;
     return `shared-script-${draftKeyRef.current}-${Date.now().toString(36)}`;
-  };
+  }, []);
 
   const selectedScript = useMemo(
     () => scripts.find((item) => item.draftKey === selectedScriptKey) ?? null,
@@ -61,38 +63,32 @@ export default function SharedScriptsManagerModal({
 
   const manifestScripts = useMemo(() => scripts.map(toManifestScript), [scripts]);
 
-  useEffect(() => {
-    let cancelled = false;
+  const loadScripts = useCallback(async () => {
     setIsLoading(true);
     setManifestError(null);
     setManifestMessage(null);
-    void listSharedScripts(root)
-      .then((entries) => {
-        if (cancelled) {
-          return;
+    try {
+      const entries = await listSharedScripts(root);
+      const normalized = entries.map((entry) => mapSharedEntryToScriptDraft(entry, nextDraftKey()));
+      setScripts(normalized);
+      setSelectedScriptKey((prev) => {
+        if (prev && normalized.some((item) => item.draftKey === prev)) {
+          return prev;
         }
-        const normalized = entries.map((entry) => mapSharedEntryToScriptDraft(entry, nextDraftKey()));
-        setScripts(normalized);
-        setSelectedScriptKey(normalized[0]?.draftKey ?? null);
-      })
-      .catch((error) => {
-        if (cancelled) {
-          return;
-        }
-        setScripts([]);
-        setSelectedScriptKey(null);
-        setManifestError(error instanceof Error ? error.message : "加载通用脚本失败");
-      })
-      .finally(() => {
-        if (cancelled) {
-          return;
-        }
-        setIsLoading(false);
+        return normalized[0]?.draftKey ?? null;
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [root]);
+    } catch (error) {
+      setScripts([]);
+      setSelectedScriptKey(null);
+      setManifestError(error instanceof Error ? error.message : "加载通用脚本失败");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [nextDraftKey, root]);
+
+  useEffect(() => {
+    void loadScripts();
+  }, [loadScripts]);
 
   useEffect(() => {
     if (!selectedScript || !selectedScript.path.trim()) {
@@ -192,6 +188,23 @@ export default function SharedScriptsManagerModal({
     }
   };
 
+  const handleRestorePresets = async () => {
+    setManifestError(null);
+    setManifestMessage(null);
+    setIsRestoringPresets(true);
+    try {
+      const result = await restoreSharedScriptPresets(root);
+      await loadScripts();
+      setManifestMessage(
+        `内置预设已同步（版本 ${result.presetVersion}）：新增 ${result.addedScripts} 项，补齐文件 ${result.createdFiles} 个。`,
+      );
+    } catch (error) {
+      setManifestError(error instanceof Error ? error.message : "恢复内置预设失败");
+    } finally {
+      setIsRestoringPresets(false);
+    }
+  };
+
   const handleSaveScriptContent = async () => {
     if (!selectedScript) {
       return;
@@ -273,135 +286,144 @@ export default function SharedScriptsManagerModal({
           {manifestMessage ? <div className="mt-2 text-fs-caption text-success">{manifestMessage}</div> : null}
         </div>
 
-          <div className="flex flex-col gap-3 rounded-xl border border-border bg-card-bg p-3">
-            {!selectedScript ? (
-              <div className="text-fs-caption text-secondary-text">请选择或新增一个脚本。</div>
-            ) : (
-              <>
-                <div className="grid gap-2 md:grid-cols-2">
-                  <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text">
-                    <span>ID</span>
-                    <input
-                      className="rounded-md border border-border bg-card-bg px-2 py-2 text-text"
-                      value={selectedScript.id}
-                      onChange={(event) => patchSelectedScript({ id: event.target.value })}
-                      placeholder="唯一标识，例如 jenkins-deploy"
-                    />
-                  </label>
-                  <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text">
-                    <span>名称</span>
-                    <input
-                      className="rounded-md border border-border bg-card-bg px-2 py-2 text-text"
-                      value={selectedScript.name}
-                      onChange={(event) => patchSelectedScript({ name: event.target.value })}
-                      placeholder="例如 Jenkins 部署"
-                    />
-                  </label>
-                </div>
-
+        <div className="flex flex-col gap-3 rounded-xl border border-border bg-card-bg p-3">
+          {!selectedScript ? (
+            <div className="text-fs-caption text-secondary-text">请选择或新增一个脚本。</div>
+          ) : (
+            <>
+              <div className="grid gap-2 md:grid-cols-2">
                 <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text">
-                  <span>脚本相对路径</span>
+                  <span>ID</span>
                   <input
                     className="rounded-md border border-border bg-card-bg px-2 py-2 text-text"
-                    value={selectedScript.path}
-                    onChange={(event) => patchSelectedScript({ path: event.target.value })}
-                    placeholder="例如 ops/jenkins-deploy.sh"
+                    value={selectedScript.id}
+                    onChange={(event) => patchSelectedScript({ id: event.target.value })}
+                    placeholder="唯一标识，例如 jenkins-deploy"
                   />
                 </label>
-
                 <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text">
-                  <span>命令模板</span>
-                  <textarea
-                    className="min-h-[84px] resize-y rounded-md border border-border bg-card-bg px-2 py-2 text-text"
-                    value={selectedScript.commandTemplate}
-                    onChange={(event) => patchSelectedScript({ commandTemplate: event.target.value })}
-                    placeholder={`例如 ${DEFAULT_COMMAND_TEMPLATE}`}
+                  <span>名称</span>
+                  <input
+                    className="rounded-md border border-border bg-card-bg px-2 py-2 text-text"
+                    value={selectedScript.name}
+                    onChange={(event) => patchSelectedScript({ name: event.target.value })}
+                    placeholder="例如 Jenkins 部署"
                   />
                 </label>
+              </div>
 
-                <section className="rounded-md border border-border bg-secondary-background p-2.5">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <div className="text-[13px] font-semibold text-text">参数</div>
-                    <button
-                      className="btn btn-outline"
-                      onClick={() =>
-                        patchSelectedScript({
-                          params: [...selectedScript.params, createEmptyParamField(selectedScript.params.length + 1)],
-                        })
-                      }
-                    >
-                      添加参数
-                    </button>
-                  </div>
-                  {selectedScript.params.length === 0 ? (
-                    <div className="text-fs-caption text-secondary-text">
-                      当前没有参数。模板里使用 `${"{host}"}` 等占位符时建议在此定义。
-                    </div>
-                  ) : (
-                    <div className="flex flex-col gap-2">
-                      {selectedScript.params.map((param, index) => (
-                        <ParameterEditor
-                          key={`${param.key || "param"}-${index}`}
-                          value={param}
-                          onChange={(nextParam) => {
-                            const nextParams = [...selectedScript.params];
-                            nextParams[index] = nextParam;
-                            patchSelectedScript({ params: nextParams });
-                          }}
-                          onRemove={() => {
-                            const nextParams = selectedScript.params.filter((_, itemIndex) => itemIndex !== index);
-                            patchSelectedScript({ params: nextParams });
-                          }}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </section>
+              <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text">
+                <span>脚本相对路径</span>
+                <input
+                  className="rounded-md border border-border bg-card-bg px-2 py-2 text-text"
+                  value={selectedScript.path}
+                  onChange={(event) => patchSelectedScript({ path: event.target.value })}
+                  placeholder="例如 ops/jenkins-deploy.sh"
+                />
+              </label>
 
-                <section className="rounded-md border border-border bg-secondary-background p-2.5">
-                  <div className="mb-2 text-[13px] font-semibold text-text">脚本内容</div>
-                  {isLoadingScriptContent ? (
-                    <div className="text-fs-caption text-secondary-text">加载脚本内容中...</div>
-                  ) : (
-                    <textarea
-                      className="min-h-[210px] w-full resize-y rounded-md border border-border bg-card-bg px-2 py-2 font-mono text-[12px] leading-relaxed text-text"
-                      value={scriptContent}
-                      onChange={(event) => setScriptContent(event.target.value)}
-                      placeholder="#!/usr/bin/env bash"
-                    />
-                  )}
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <button
-                      className="btn btn-primary"
-                      onClick={() => void handleSaveScriptContent()}
-                      disabled={isLoadingScriptContent || isSavingScriptContent}
-                    >
-                      {isSavingScriptContent ? "保存中..." : "保存脚本文件"}
-                    </button>
-                    {scriptContentPath ? (
-                      <span className="text-fs-caption text-secondary-text">当前文件：{scriptContentPath}</span>
-                    ) : null}
+              <label className="flex flex-col gap-1.5 text-[13px] text-secondary-text">
+                <span>命令模板</span>
+                <textarea
+                  className="min-h-[84px] resize-y rounded-md border border-border bg-card-bg px-2 py-2 text-text"
+                  value={selectedScript.commandTemplate}
+                  onChange={(event) => patchSelectedScript({ commandTemplate: event.target.value })}
+                  placeholder={`例如 ${DEFAULT_COMMAND_TEMPLATE}`}
+                />
+              </label>
+
+              <section className="rounded-md border border-border bg-secondary-background p-2.5">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="text-[13px] font-semibold text-text">参数</div>
+                  <button
+                    className="btn btn-outline"
+                    onClick={() =>
+                      patchSelectedScript({
+                        params: [...selectedScript.params, createEmptyParamField(selectedScript.params.length + 1)],
+                      })
+                    }
+                  >
+                    添加参数
+                  </button>
+                </div>
+                {selectedScript.params.length === 0 ? (
+                  <div className="text-fs-caption text-secondary-text">
+                    当前没有参数。模板里使用 `${"{host}"}` 等占位符时建议在此定义。
                   </div>
-                  {scriptContentError ? (
-                    <div className="mt-1 text-fs-caption text-error">{scriptContentError}</div>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    {selectedScript.params.map((param, index) => (
+                      <ParameterEditor
+                        key={`${param.key || "param"}-${index}`}
+                        value={param}
+                        onChange={(nextParam) => {
+                          const nextParams = [...selectedScript.params];
+                          nextParams[index] = nextParam;
+                          patchSelectedScript({ params: nextParams });
+                        }}
+                        onRemove={() => {
+                          const nextParams = selectedScript.params.filter((_, itemIndex) => itemIndex !== index);
+                          patchSelectedScript({ params: nextParams });
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="rounded-md border border-border bg-secondary-background p-2.5">
+                <div className="mb-2 text-[13px] font-semibold text-text">脚本内容</div>
+                {isLoadingScriptContent ? (
+                  <div className="text-fs-caption text-secondary-text">加载脚本内容中...</div>
+                ) : (
+                  <textarea
+                    className="min-h-[210px] w-full resize-y rounded-md border border-border bg-card-bg px-2 py-2 font-mono text-[12px] leading-relaxed text-text"
+                    value={scriptContent}
+                    onChange={(event) => setScriptContent(event.target.value)}
+                    placeholder="#!/usr/bin/env bash"
+                  />
+                )}
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => void handleSaveScriptContent()}
+                    disabled={isLoadingScriptContent || isSavingScriptContent}
+                  >
+                    {isSavingScriptContent ? "保存中..." : "保存脚本文件"}
+                  </button>
+                  {scriptContentPath ? (
+                    <span className="text-fs-caption text-secondary-text">当前文件：{scriptContentPath}</span>
                   ) : null}
-                  {scriptContentMessage ? (
-                    <div className="mt-1 text-fs-caption text-success">{scriptContentMessage}</div>
-                  ) : null}
-                </section>
-              </>
-            )}
-          </div>
-        </section>
+                </div>
+                {scriptContentError ? (
+                  <div className="mt-1 text-fs-caption text-error">{scriptContentError}</div>
+                ) : null}
+                {scriptContentMessage ? (
+                  <div className="mt-1 text-fs-caption text-success">{scriptContentMessage}</div>
+                ) : null}
+              </section>
+            </>
+          )}
+        </div>
+      </section>
 
       <div className="flex justify-between gap-2">
-        <button
-          className="btn btn-outline"
-          onClick={handleRemoveSelectedScript}
-          disabled={!selectedScript}
-        >
-          删除当前脚本
-        </button>
+        <div className="flex gap-2">
+          <button
+            className="btn btn-outline"
+            onClick={handleRemoveSelectedScript}
+            disabled={!selectedScript}
+          >
+            删除当前脚本
+          </button>
+          <button
+            className="btn btn-outline"
+            onClick={() => void handleRestorePresets()}
+            disabled={isRestoringPresets}
+          >
+            {isRestoringPresets ? "恢复中..." : "恢复内置预设"}
+          </button>
+        </div>
         <div className="flex gap-2">
           {!inline && onClose ? (
             <button className="btn" onClick={onClose}>

@@ -55,6 +55,13 @@ export type SharedScriptManifestScript = {
   params: ScriptParamField[];
 };
 
+export type SharedScriptPresetRestoreResult = {
+  presetVersion: string;
+  addedScripts: number;
+  skippedScripts: number;
+  createdFiles: number;
+};
+
 export type ProjectWorktree = {
   id: string;
   name: string;

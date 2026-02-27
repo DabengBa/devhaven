@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { SharedScriptEntry, SharedScriptManifestScript } from "../models/types";
+import type {
+  SharedScriptEntry,
+  SharedScriptManifestScript,
+  SharedScriptPresetRestoreResult,
+} from "../models/types";
 
 /** 列出全局共享脚本（优先读取 manifest，否则回退目录扫描）。 */
 export async function listSharedScripts(root?: string): Promise<SharedScriptEntry[]> {
@@ -18,6 +22,16 @@ export async function saveSharedScriptsManifest(
   const normalizedRoot = root?.trim();
   await invoke("save_shared_scripts_manifest", {
     scripts,
+    root: normalizedRoot ? normalizedRoot : null,
+  });
+}
+
+/** 恢复内置共享脚本预设（仅补齐缺失项）。 */
+export async function restoreSharedScriptPresets(
+  root?: string,
+): Promise<SharedScriptPresetRestoreResult> {
+  const normalizedRoot = root?.trim();
+  return invoke<SharedScriptPresetRestoreResult>("restore_shared_script_presets", {
     root: normalizedRoot ? normalizedRoot : null,
   });
 }

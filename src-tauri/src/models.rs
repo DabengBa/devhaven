@@ -326,6 +326,15 @@ pub struct SharedScriptManifestScript {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SharedScriptPresetRestoreResult {
+    pub preset_version: String,
+    pub added_scripts: usize,
+    pub skipped_scripts: usize,
+    pub created_files: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MarkdownFileEntry {
     pub path: String,
     pub absolute_path: String,

@@ -30,15 +30,15 @@ use crate::models::{
     GitWorktreeAddResult, GitWorktreeListItem, GlobalSkillInstallRequest, GlobalSkillInstallResult,
     GlobalSkillUninstallRequest, GlobalSkillsSnapshot, HeatmapCacheFile, InteractionLockPayload,
     MarkdownFileEntry, Project, ProjectNotesPreview, SharedScriptEntry, SharedScriptManifestScript,
-    TerminalCodexPaneOverlay, TerminalWorkspace, TerminalWorkspaceSummary,
-    WorktreeInitCancelResult, WorktreeInitCreateBlockingResult, WorktreeInitJobStatus,
-    WorktreeInitRetryRequest, WorktreeInitStartRequest, WorktreeInitStartResult,
-    WorktreeInitStatusQuery, WorktreeInitStep,
+    SharedScriptPresetRestoreResult, TerminalCodexPaneOverlay, TerminalWorkspace,
+    TerminalWorkspaceSummary, WorktreeInitCancelResult, WorktreeInitCreateBlockingResult,
+    WorktreeInitJobStatus, WorktreeInitRetryRequest, WorktreeInitStartRequest,
+    WorktreeInitStartResult, WorktreeInitStatusQuery, WorktreeInitStep,
 };
 use crate::system::EditorOpenParams;
 use crate::terminal::{
-    terminal_create_session, terminal_get_codex_pane_overlay, terminal_kill, terminal_resize,
-    terminal_write, TerminalState,
+    TerminalState, terminal_create_session, terminal_get_codex_pane_overlay, terminal_kill,
+    terminal_resize, terminal_write,
 };
 
 const INTERACTION_LOCK_REASON_WORKTREE_CREATE: &str = "worktree-create";
@@ -530,6 +530,17 @@ fn save_shared_scripts_manifest(
 }
 
 #[tauri::command]
+/// 恢复内置共享脚本预设（仅补齐缺失脚本，不覆盖已有条目）。
+fn restore_shared_script_presets(
+    app: AppHandle,
+    root: Option<String>,
+) -> Result<SharedScriptPresetRestoreResult, String> {
+    log_command_result("restore_shared_script_presets", || {
+        shared_scripts::restore_shared_script_presets(&app, root.as_deref())
+    })
+}
+
+#[tauri::command]
 /// 读取全局共享脚本文件内容。
 fn read_shared_script_file(
     app: AppHandle,
@@ -834,6 +845,7 @@ pub fn run() {
             open_in_editor,
             list_shared_scripts,
             save_shared_scripts_manifest,
+            restore_shared_script_presets,
             read_shared_script_file,
             write_shared_script_file,
             copy_to_clipboard,
