@@ -29,3 +29,22 @@
 ## Review
 - 本次改动只移除了“终端 pane 右上角浮层”链路，未影响侧栏 Codex 会话监控与运行状态聚合能力。
 - Rust 侧同时清理了仅服务该浮层的 rollout/lsof/process-tree 代码，避免保留死代码和无效 command。
+
+---
+
+# App.tsx 拆分重构任务清单
+
+- [x] 提取纯函数到 `src/utils/worktreeHelpers.ts`
+- [x] 提取基础 hooks：`useToast`、`useProjectSelection`、`useProjectFilter`
+- [x] 提取终端/worktree hooks：`useTerminalWorkspace`、`useWorktreeManager`
+- [x] 提取 Codex 与命令面板 hooks：`useCodexIntegration`、`useCommandPalette`
+- [x] 追加视图/业务聚合 hooks：`useAppViewState`、`useAppActions`
+- [x] 重组 `src/App.tsx`，保持渲染行为不变并将文件收敛到 < 350 行
+- [x] 更新 `AGENTS.md` 功能定位
+- [x] 构建验证：`npm run build`
+
+## Review
+- `src/App.tsx` 从 2336 行收敛到 349 行，职责聚焦为“组装 hooks + 渲染树”。
+- 终端、worktree、命令面板、Codex 监控与筛选逻辑全部迁入独立 hooks，降低跨域耦合。
+- 补充 `useAppActions` / `useAppViewState` 统一承接批量操作与顶层视图状态，减少 App 内业务噪声。
+- 构建已通过（`tsc && vite build`），未改动 Tauri 命令与存储结构，功能链路保持不变。
