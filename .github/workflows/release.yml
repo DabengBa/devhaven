@@ -48,6 +48,12 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Frontend quality gate (build)
+        run: pnpm build
+
+      - name: Rust quality gate (check)
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+
       - name: Tauri build and release
         uses: tauri-apps/tauri-action@v0
         env:
