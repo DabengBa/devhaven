@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import DOMPurify from "dompurify";
 import { marked } from "marked";
 
 import type { MarkdownFileEntry } from "../models/markdown";
@@ -110,7 +111,7 @@ export default function ProjectMarkdownSection({ project }: ProjectMarkdownSecti
       return "";
     }
     const result = marked.parse(markdownContent);
-    return typeof result === "string" ? result : "";
+    return typeof result === "string" ? DOMPurify.sanitize(result) : "";
   }, [markdownContent]);
 
   const toggleMarkdownFolder = (path: string) => {

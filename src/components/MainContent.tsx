@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Project, ProjectListViewMode } from "../models/types";
 import type { DateFilter, GitFilter } from "../models/filters";
@@ -60,7 +60,7 @@ export type MainContentProps = {
 };
 
 /** 主内容区，负责搜索过滤与项目列表展示。 */
-export default function MainContent({
+function MainContent({
   projects,
   filteredProjects,
   favoriteProjectPaths,
@@ -103,6 +103,8 @@ export default function MainContent({
   const [isNotesPreviewLoading, setIsNotesPreviewLoading] = useState(false);
   const previewRequestIdRef = useRef(0);
   const selectedProjectIds = useMemo(() => Array.from(selectedProjects), [selectedProjects]);
+  const selectedProjectIdsRef = useRef(selectedProjectIds);
+  selectedProjectIdsRef.current = selectedProjectIds;
   const bulkTagMenuItems = useMemo(
     () =>
       availableTags.length
@@ -110,11 +112,11 @@ export default function MainContent({
             key: `bulk-tag-${tag}`,
             label: `添加标签：${tag}`,
             onClick: () => {
-              void onBulkAssignTagToProjects(tag, selectedProjectIds);
+              void onBulkAssignTagToProjects(tag, selectedProjectIdsRef.current);
             },
           }))
         : [{ key: "bulk-tag-empty", label: "暂无可用标签", disabled: true }],
-    [availableTags, onBulkAssignTagToProjects, selectedProjectIds],
+    [availableTags, onBulkAssignTagToProjects],
   );
   const listProjectPaths = useMemo(() => filteredProjects.map((project) => project.path), [filteredProjects]);
   const listProjectPathsKey = useMemo(() => listProjectPaths.join("\n"), [listProjectPaths]);
@@ -348,3 +350,5 @@ export default function MainContent({
     </section>
   );
 }
+
+export default memo(MainContent);

@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useMemo } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo } from "react";
 import Sidebar from "./components/Sidebar";
 import MainContent from "./components/MainContent";
 import DetailPanel from "./components/DetailPanel";
@@ -140,6 +140,69 @@ function AppLayout() {
     };
   }, []);
 
+  const handleClearHeatmapFilter = useCallback(() => {
+    filter.setHeatmapFilteredProjectIds(new Set());
+    filter.setHeatmapSelectedDateKey(null);
+  }, [filter.setHeatmapFilteredProjectIds, filter.setHeatmapSelectedDateKey]);
+
+  const handleOpenRecycleBin = useCallback(() => {
+    viewState.setShowRecycleBin(true);
+  }, [viewState.setShowRecycleBin]);
+
+  const handleViewModeChange = useCallback(
+    (mode: ProjectListViewMode) => void appActions.handleChangeProjectListViewMode(mode),
+    [appActions.handleChangeProjectListViewMode],
+  );
+
+  const handleOpenDashboard = useCallback(() => {
+    viewState.setShowDashboard(true);
+  }, [viewState.setShowDashboard]);
+
+  const handleOpenSettings = useCallback(() => {
+    viewState.setShowSettings(true);
+  }, [viewState.setShowSettings]);
+
+  const handleOpenGlobalSkills = useCallback(() => {
+    viewState.setShowGlobalSkills(true);
+  }, [viewState.setShowGlobalSkills]);
+
+  const handleCloseDetailPanel = useCallback(() => {
+    selection.setShowDetailPanel(false);
+  }, [selection.setShowDetailPanel]);
+
+  const handleTagDialogSubmit = useCallback(
+    (name: string, color: string) => void appActions.handleTagSubmit(name, color),
+    [appActions.handleTagSubmit],
+  );
+
+  const handleTerminalCreateWorktree = useCallback(
+    (projectId: string) => void worktree.handleRequestCreateWorktree(projectId),
+    [worktree.handleRequestCreateWorktree],
+  );
+
+  const handleTerminalOpenWorktree = useCallback(
+    (projectId: string, worktreePath: string) => void worktree.handleOpenWorktreeFromProject(projectId, worktreePath),
+    [worktree.handleOpenWorktreeFromProject],
+  );
+
+  const handleTerminalDeleteWorktree = useCallback(
+    (projectId: string, worktreePath: string) => void worktree.handleDeleteWorktreeFromProject(projectId, worktreePath),
+    [worktree.handleDeleteWorktreeFromProject],
+  );
+
+  const handleTerminalRetryWorktree = useCallback(
+    (projectId: string, worktreePath: string) => void worktree.handleRetryWorktreeFromProject(projectId, worktreePath),
+    [worktree.handleRetryWorktreeFromProject],
+  );
+
+  const handleTerminalRefreshWorktrees = useCallback(
+    (projectId: string) => void terminal.syncTerminalProjectWorktrees(projectId, { showToast: true }),
+    [terminal.syncTerminalProjectWorktrees],
+  );
+
+  const handleTerminalExit = useCallback(() => {
+    terminal.setShowTerminalWorkspace(false);
+  }, [terminal.setShowTerminalWorkspace]);
 
   return (
     <div className="relative h-full bg-background">
@@ -161,10 +224,7 @@ function AppLayout() {
           heatmapFilteredProjectIds={filter.heatmapFilteredProjectIds}
           heatmapActiveProjects={filter.heatmapActiveProjects}
           onSelectTag={filter.handleSelectTag}
-          onClearHeatmapFilter={() => {
-            filter.setHeatmapFilteredProjectIds(new Set());
-            filter.setHeatmapSelectedDateKey(null);
-          }}
+          onClearHeatmapFilter={handleClearHeatmapFilter}
           onSelectHeatmapDate={filter.handleSelectHeatmapDate}
           onLocateHeatmapProject={filter.handleLocateHeatmapProject}
           onSelectDirectory={filter.handleSelectDirectory}
@@ -174,7 +234,7 @@ function AppLayout() {
           onAssignTagToProjects={appActions.handleAssignTagToProjects}
           onAddDirectory={addDirectory}
           onRemoveDirectory={removeDirectory}
-          onOpenRecycleBin={() => viewState.setShowRecycleBin(true)}
+          onOpenRecycleBin={handleOpenRecycleBin}
           onRefresh={refresh}
           onAddProjects={addProjects}
           isHeatmapLoading={heatmapStore.isLoading}
@@ -197,12 +257,12 @@ function AppLayout() {
           gitFilter={filter.gitFilter}
           onGitFilterChange={filter.setGitFilter}
           viewMode={projectListViewMode}
-          onViewModeChange={(mode) => void appActions.handleChangeProjectListViewMode(mode)}
+          onViewModeChange={handleViewModeChange}
           showDetailPanel={selection.showDetailPanel}
           onToggleDetailPanel={selection.handleToggleDetail}
-          onOpenDashboard={() => viewState.setShowDashboard(true)}
-          onOpenSettings={() => viewState.setShowSettings(true)}
-          onOpenGlobalSkills={() => viewState.setShowGlobalSkills(true)}
+          onOpenDashboard={handleOpenDashboard}
+          onOpenSettings={handleOpenSettings}
+          onOpenGlobalSkills={handleOpenGlobalSkills}
           availableTags={appState.tags.map((tag) => tag.name)}
           selectedProjects={selection.selectedProjects}
           onSelectProject={selection.handleSelectProject}
@@ -226,7 +286,7 @@ function AppLayout() {
           <DetailPanel
             project={selection.resolvedSelectedProject}
             tags={appState.tags}
-            onClose={() => selection.setShowDetailPanel(false)}
+            onClose={handleCloseDetailPanel}
             onAddTagToProject={addTagToProject}
             onRemoveTagFromProject={removeTagFromProject}
             onRunProjectScript={terminal.handleRunProjectScript}
@@ -247,7 +307,7 @@ function AppLayout() {
         initialName={viewState.tagDialogState?.tag?.name ?? ""}
         initialColor={viewState.tagDialogState?.tag ? appActions.getTagHex(viewState.tagDialogState.tag.color) : undefined}
         onClose={() => viewState.setTagDialogState(null)}
-        onSubmit={(name, color) => void appActions.handleTagSubmit(name, color)}
+        onSubmit={handleTagDialogSubmit}
       />
 
       {viewState.showRecycleBin ? (
@@ -319,12 +379,12 @@ function AppLayout() {
               quickCommandDispatch={terminal.terminalQuickCommandDispatch}
               onSelectProject={terminal.setTerminalActiveProjectId}
               onCloseProject={terminal.handleCloseTerminalProject}
-              onCreateWorktree={(projectId) => void worktree.handleRequestCreateWorktree(projectId)}
-              onOpenWorktree={(projectId, worktreePath) => void worktree.handleOpenWorktreeFromProject(projectId, worktreePath)}
-              onDeleteWorktree={(projectId, worktreePath) => void worktree.handleDeleteWorktreeFromProject(projectId, worktreePath)}
-              onRetryWorktree={(projectId, worktreePath) => void worktree.handleRetryWorktreeFromProject(projectId, worktreePath)}
-              onRefreshWorktrees={(projectId) => void terminal.syncTerminalProjectWorktrees(projectId, { showToast: true })}
-              onExit={() => terminal.setShowTerminalWorkspace(false)}
+              onCreateWorktree={handleTerminalCreateWorktree}
+              onOpenWorktree={handleTerminalOpenWorktree}
+              onDeleteWorktree={handleTerminalDeleteWorktree}
+              onRetryWorktree={handleTerminalRetryWorktree}
+              onRefreshWorktrees={handleTerminalRefreshWorktrees}
+              onExit={handleTerminalExit}
               windowLabel={MAIN_WINDOW_LABEL}
               isVisible={terminal.showTerminalWorkspace}
               codexProjectStatusById={codex.codexProjectStatusById}

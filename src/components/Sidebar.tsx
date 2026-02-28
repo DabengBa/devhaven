@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import type { HeatmapData } from "../models/heatmap";
@@ -51,7 +51,7 @@ export type SidebarProps = {
 };
 
 /** 左侧边栏，负责目录、标签与筛选入口。 */
-export default function Sidebar({
+function Sidebar({
   appState,
   projects,
   heatmapData,
@@ -306,6 +306,8 @@ export default function Sidebar({
   );
 }
 
+export default memo(Sidebar);
+
 type DirectoryRowProps = {
   label: string;
   count: number;
@@ -316,7 +318,7 @@ type DirectoryRowProps = {
 };
 
 /** 目录行，展示数量与快捷操作。 */
-function DirectoryRow({ label, count, selected, onClick, onOpen, onRemove }: DirectoryRowProps) {
+const DirectoryRow = memo(function DirectoryRow({ label, count, selected, onClick, onOpen, onRemove }: DirectoryRowProps) {
   const menuItems = [] as { label: string; onClick: () => void; destructive?: boolean }[];
   if (onOpen) {
     menuItems.push({ label: "在访达中显示", onClick: onOpen });
@@ -341,7 +343,7 @@ function DirectoryRow({ label, count, selected, onClick, onOpen, onRemove }: Dir
       </div>
     </div>
   );
-}
+});
 
 type TagRowProps = {
   label: string;
@@ -357,7 +359,7 @@ type TagRowProps = {
 };
 
 /** 标签行，支持隐藏、编辑与拖拽分配。 */
-function TagRow({
+const TagRow = memo(function TagRow({
   label,
   count,
   selected,
@@ -439,4 +441,4 @@ function TagRow({
       </div>
     </div>
   );
-}
+});

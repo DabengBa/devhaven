@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useCallback, useMemo } from "react";
 
 import type { Project } from "../models/types";
 import { swiftDateToJsDate } from "../models/types";
@@ -52,62 +52,72 @@ function ProjectCard({
 }: ProjectCardProps) {
   const displayPath = formatPathWithTilde(project.path);
   const scripts = project.scripts ?? [];
-  const scriptMenuItems = scripts.length
-    ? scripts.map((script) => ({
-        key: `script-${script.id}`,
-        label: `运行：${script.name}`,
+  const scriptMenuItems = useMemo(
+    () =>
+      scripts.length
+        ? scripts.map((script) => ({
+            key: `script-${script.id}`,
+            label: `运行：${script.name}`,
+            onClick: () => {
+              void onRunProjectScript(project.id, script.id);
+            },
+          }))
+        : [{ key: "script-empty", label: "暂无快捷命令", disabled: true }],
+    [scripts, onRunProjectScript, project.id],
+  );
+  const moreMenuItems = useMemo(
+    () => [
+      {
+        key: "open",
+        label: "在 Finder 中显示",
         onClick: () => {
-          void onRunProjectScript(project.id, script.id);
+          void openInFinder(project.path);
         },
-      }))
-    : [{ key: "script-empty", label: "暂无快捷命令", disabled: true }];
-  const moreMenuItems = [
-    {
-      key: "open",
-      label: "在 Finder 中显示",
-      onClick: () => {
-        void openInFinder(project.path);
       },
-    },
-    {
-      key: "copy",
-      label: "复制路径",
-      onClick: () => {
-        void onCopyPath(project.path);
+      {
+        key: "copy",
+        label: "复制路径",
+        onClick: () => {
+          void onCopyPath(project.path);
+        },
       },
-    },
-    {
-      key: "refresh",
-      label: "刷新项目",
-      onClick: () => {
-        void onRefreshProject(project.path);
+      {
+        key: "refresh",
+        label: "刷新项目",
+        onClick: () => {
+          void onRefreshProject(project.path);
+        },
       },
-    },
-    { key: "divider-script", divider: true },
-    ...scriptMenuItems,
-    { key: "divider-danger", divider: true },
-    {
-      key: "trash",
-      label: "移入回收站",
-      destructive: true,
-      onClick: () => {
-        void onMoveToRecycleBin(project);
+      { key: "divider-script", divider: true },
+      ...scriptMenuItems,
+      { key: "divider-danger", divider: true },
+      {
+        key: "trash",
+        label: "移入回收站",
+        destructive: true,
+        onClick: () => {
+          void onMoveToRecycleBin(project);
+        },
       },
-    },
-  ];
+    ],
+    [project, scriptMenuItems, onCopyPath, onRefreshProject, onMoveToRecycleBin],
+  );
 
-  const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
-    const ids = selectedProjectIds.has(project.id)
-      ? Array.from(selectedProjectIds)
-      : [project.id];
-    event.dataTransfer.setData("application/x-project-ids", JSON.stringify(ids));
-    event.dataTransfer.effectAllowed = "copy";
-  };
+  const handleDragStart = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      const ids = selectedProjectIds.has(project.id)
+        ? Array.from(selectedProjectIds)
+        : [project.id];
+      event.dataTransfer.setData("application/x-project-ids", JSON.stringify(ids));
+      event.dataTransfer.effectAllowed = "copy";
+    },
+    [selectedProjectIds, project.id],
+  );
 
-  const handleActionClick = (event: React.MouseEvent, action: () => void) => {
+  const handleActionClick = useCallback((event: React.MouseEvent, action: () => void) => {
     event.stopPropagation();
     action();
-  };
+  }, []);
 
   return (
     <div

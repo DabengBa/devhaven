@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import DOMPurify from "dompurify";
 import { marked } from "marked";
 
 import type { Project, ProjectScript, ScriptParamField, SharedScriptEntry, TagData } from "../models/types";
@@ -69,7 +70,7 @@ const formatDate = (swiftDate: number) => {
 };
 
 /** 右侧详情面板，负责项目详情、备注与分支管理。 */
-export default function DetailPanel({
+function DetailPanel({
   project,
   tags,
   onClose,
@@ -403,7 +404,7 @@ export default function DetailPanel({
       return "";
     }
     const rendered = marked.parse(fallbackReadme.content);
-    return typeof rendered === "string" ? rendered : "";
+    return typeof rendered === "string" ? DOMPurify.sanitize(rendered) : "";
   }, [fallbackReadme?.content]);
 
   if (!project) {
@@ -918,6 +919,8 @@ export default function DetailPanel({
     </aside>
   );
 }
+
+export default memo(DetailPanel);
 
 function createScriptDialogState(input: {
   mode: "new" | "edit";
