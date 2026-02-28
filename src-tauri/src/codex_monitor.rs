@@ -34,7 +34,9 @@ const NEEDS_ATTENTION_WINDOW_MS: i64 = 15 * 60_000;
 const OFFLINE_GRACE_MS: i64 = 15_000;
 const RECENT_FILE_WINDOW_MS: i64 = 5 * 60_000;
 const WATCH_DEBOUNCE_MS: u64 = 350;
-const PROCESS_POLL_INTERVAL_MS: u64 = 3_000;
+const PROCESS_POLL_ACTIVE_INTERVAL_MS: u64 = 3_000;
+const PROCESS_POLL_IDLE_INTERVAL_MS: u64 = 12_000;
+const LSOF_RESULT_CACHE_TTL_MS: i64 = 8_000;
 const CANDIDATE_DAYS: usize = 2;
 
 pub const CODEX_MONITOR_SNAPSHOT_EVENT: &str = "codex-monitor-snapshot";
@@ -52,9 +54,23 @@ struct CachedSession {
     size: u64,
 }
 
+#[derive(Clone)]
+struct CachedSessionMeta {
+    modified: i64,
+    size: u64,
+    state: CodexMonitorState,
+}
+
+#[derive(Clone, Copy)]
+struct LsofProbeCache {
+    result: Option<bool>,
+    checked_at: i64,
+}
+
 #[derive(Default)]
 struct MonitorRuntime {
     cache: SessionCache,
+    lsof_probe_cache: HashMap<PathBuf, LsofProbeCache>,
     previous_states: HashMap<String, CodexMonitorState>,
     previous_process_running: bool,
     has_bootstrapped: bool,
@@ -80,6 +96,12 @@ struct SessionMeta {
     cwd: String,
     cli_version: Option<String>,
     started_at: i64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct EntryClassification {
+    indicates_error: bool,
+    indicates_needs_attention: bool,
 }
 
 pub fn ensure_monitoring_started(app: &AppHandle) -> Result<(), String> {
@@ -123,12 +145,29 @@ pub fn ensure_monitoring_started(app: &AppHandle) -> Result<(), String> {
     let poll_app = app.clone();
     thread::spawn(move || {
         loop {
-            thread::sleep(Duration::from_millis(PROCESS_POLL_INTERVAL_MS));
+            thread::sleep(Duration::from_millis(next_process_poll_interval_ms()));
             emit_monitoring(&poll_app);
         }
     });
 
     Ok(())
+}
+
+fn next_process_poll_interval_ms() -> u64 {
+    let runtime = CODEX_MONITOR_RUNTIME.get_or_init(|| Mutex::new(MonitorRuntime::default()));
+    let Ok(runtime) = runtime.lock() else {
+        return PROCESS_POLL_ACTIVE_INTERVAL_MS;
+    };
+
+    let has_time_sensitive_session = runtime
+        .cache
+        .values()
+        .any(|cached| requires_time_based_refresh(&cached.session.state));
+    if has_time_sensitive_session || runtime.previous_process_running {
+        PROCESS_POLL_ACTIVE_INTERVAL_MS
+    } else {
+        PROCESS_POLL_IDLE_INTERVAL_MS
+    }
 }
 
 pub fn get_snapshot(app: &AppHandle) -> Result<CodexMonitorSnapshot, String> {
@@ -208,19 +247,36 @@ fn refresh_monitoring(
         .join(CODEX_SESSIONS_DIR);
 
     let now_ms = Utc::now().timestamp_millis();
-    let mut seen = HashSet::new();
+    let process_running = any_codex_process_running();
+    let recent_threshold = now_ms - RECENT_FILE_WINDOW_MS;
     let mut files = Vec::new();
     if base_dir.exists() {
         files = collect_rollout_files(&base_dir)?;
     }
 
-    let process_running = any_codex_process_running();
-    let recent_threshold = now_ms - RECENT_FILE_WINDOW_MS;
-
     let runtime = CODEX_MONITOR_RUNTIME.get_or_init(|| Mutex::new(MonitorRuntime::default()));
-    let mut runtime = runtime
-        .lock()
-        .map_err(|_| "Codex 监控状态锁异常".to_string())?;
+    let cache_snapshot = {
+        let runtime = runtime
+            .lock()
+            .map_err(|_| "Codex 监控状态锁异常".to_string())?;
+        runtime
+            .cache
+            .iter()
+            .map(|(path, cached)| {
+                (
+                    path.clone(),
+                    CachedSessionMeta {
+                        modified: cached.modified,
+                        size: cached.size,
+                        state: cached.session.state.clone(),
+                    },
+                )
+            })
+            .collect::<HashMap<PathBuf, CachedSessionMeta>>()
+    };
+
+    let mut seen = HashSet::new();
+    let mut refreshed_sessions = Vec::new();
 
     for path in files {
         seen.insert(path.clone());
@@ -242,60 +298,95 @@ fn refresh_monitoring(
             .and_then(system_time_to_millis)
             .unwrap_or(0);
         let size = metadata.len();
-        let is_cached = runtime.cache.contains_key(&path);
+        let is_cached = cache_snapshot.contains_key(&path);
         let is_old = modified > 0 && modified < recent_threshold;
         if is_old && !is_cached {
             continue;
         }
 
-        let should_refresh = match runtime.cache.get(&path) {
+        let should_refresh = match cache_snapshot.get(&path) {
             Some(cached) => {
                 cached.modified != modified
                     || cached.size != size
-                    || requires_time_based_refresh(&cached.session.state)
+                    || requires_time_based_refresh(&cached.state)
             }
             None => true,
         };
 
-        if should_refresh {
-            match parse_session_file(&path, now_ms, process_running) {
-                Ok(session) => {
-                    runtime.cache.insert(
-                        path,
-                        CachedSession {
-                            session,
-                            modified,
-                            size,
-                        },
-                    );
-                }
-                Err(error) => {
-                    log::warn!("解析 Codex 会话失败: path={} err={}", path.display(), error);
-                }
+        if !should_refresh {
+            continue;
+        }
+
+        match parse_session_file(&path, now_ms, process_running) {
+            Ok(session) => refreshed_sessions.push((
+                path,
+                CachedSession {
+                    session,
+                    modified,
+                    size,
+                },
+            )),
+            Err(error) => {
+                log::warn!("解析 Codex 会话失败: path={} err={}", path.display(), error);
             }
         }
     }
 
-    runtime.cache.retain(|path, _| seen.contains(path));
+    let (working_paths, mut lsof_probe_cache) = {
+        let mut runtime = runtime
+            .lock()
+            .map_err(|_| "Codex 监控状态锁异常".to_string())?;
+
+        for (path, cached) in refreshed_sessions {
+            runtime.cache.insert(path, cached);
+        }
+        runtime.cache.retain(|path, _| seen.contains(path));
+        runtime
+            .lsof_probe_cache
+            .retain(|path, _| seen.contains(path));
+
+        let working_paths = runtime
+            .cache
+            .iter()
+            .filter(|(_, cached)| matches!(cached.session.state, CodexMonitorState::Working))
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+
+        (working_paths, runtime.lsof_probe_cache.clone())
+    };
+
+    let mut stale_working_sessions = HashSet::new();
+    for path in working_paths {
+        if let Some(false) =
+            codex_rollout_file_open_by_codex_throttled(&path, now_ms, &mut lsof_probe_cache)
+        {
+            stale_working_sessions.insert(path);
+        }
+    }
+
+    let mut runtime = runtime
+        .lock()
+        .map_err(|_| "Codex 监控状态锁异常".to_string())?;
+    runtime.lsof_probe_cache = lsof_probe_cache;
+
+    for path in stale_working_sessions {
+        if let Some(cached) = runtime.cache.get_mut(&path) {
+            if matches!(cached.session.state, CodexMonitorState::Working) {
+                cached.session.state = if process_running {
+                    CodexMonitorState::Idle
+                } else {
+                    CodexMonitorState::Offline
+                };
+                cached.session.is_running = false;
+            }
+        }
+    }
 
     let mut sessions: Vec<CodexMonitorSession> = runtime
         .cache
-        .iter_mut()
-        .map(|(path, cached)| {
-            if matches!(cached.session.state, CodexMonitorState::Working) {
-                if let Some(false) = codex_rollout_file_open_by_codex(path) {
-                    cached.session.state = if process_running {
-                        CodexMonitorState::Idle
-                    } else {
-                        CodexMonitorState::Offline
-                    };
-                    cached.session.is_running = false;
-                }
-            }
-            cached.session.clone()
-        })
+        .values()
+        .map(|cached| cached.session.clone())
         .collect();
-
     sessions.sort_by(|left, right| right.last_activity_at.cmp(&left.last_activity_at));
 
     let snapshot = CodexMonitorSnapshot {
@@ -303,7 +394,6 @@ fn refresh_monitoring(
         is_codex_running: process_running,
         updated_at: now_ms,
     };
-
     let events = build_monitor_events(&mut runtime, &snapshot, now_ms, emit_events);
 
     Ok((snapshot, events))
@@ -728,12 +818,13 @@ fn process_event_msg(payload: Option<&Value>, timestamp: i64, tracker: &mut Sess
         }
         _ => {
             if let Some(payload_value) = payload {
-                if entry_indicates_needs_attention(payload_value) {
+                let classification = classify_entry(payload_value);
+                if classification.indicates_needs_attention {
                     tracker.last_needs_attention_ts =
                         tracker.last_needs_attention_ts.max(timestamp);
                     tracker.details = Some("等待用户处理".to_string());
                 }
-                if entry_indicates_error(payload_value) {
+                if classification.indicates_error {
                     tracker.last_error_ts = tracker.last_error_ts.max(timestamp);
                     tracker.details = Some("任务执行出现错误".to_string());
                 }
@@ -807,12 +898,13 @@ fn process_response_item(payload: Option<&Value>, timestamp: i64, tracker: &mut 
         }
         _ => {
             if let Some(payload_value) = payload {
-                if entry_indicates_needs_attention(payload_value) {
+                let classification = classify_entry(payload_value);
+                if classification.indicates_needs_attention {
                     tracker.last_needs_attention_ts =
                         tracker.last_needs_attention_ts.max(timestamp);
                     tracker.details = Some("等待用户处理".to_string());
                 }
-                if entry_indicates_error(payload_value) {
+                if classification.indicates_error {
                     tracker.last_error_ts = tracker.last_error_ts.max(timestamp);
                     tracker.details = Some("任务执行出现错误".to_string());
                 }
@@ -941,28 +1033,26 @@ fn value_to_preview_text(value: &Value) -> Option<String> {
 }
 
 fn entry_indicates_error(value: &Value) -> bool {
-    if value
-        .get("is_error")
-        .and_then(|item| item.as_bool())
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    let text = value.to_string().to_ascii_lowercase();
-    text.contains("\"error\"")
-        || text.contains("failed")
-        || text.contains("exception")
-        || text.contains("traceback")
+    classify_entry(value).indicates_error
 }
 
-fn entry_indicates_needs_attention(value: &Value) -> bool {
+fn classify_entry(value: &Value) -> EntryClassification {
     let text = value.to_string().to_ascii_lowercase();
-    text.contains("request_user_input")
-        || text.contains("needs_attention")
-        || text.contains("awaiting_user_input")
-        || text.contains("requires_confirmation")
-        || text.contains("approval")
+    EntryClassification {
+        indicates_error: value
+            .get("is_error")
+            .and_then(|item| item.as_bool())
+            .unwrap_or(false)
+            || text.contains("\"error\"")
+            || text.contains("failed")
+            || text.contains("exception")
+            || text.contains("traceback"),
+        indicates_needs_attention: text.contains("request_user_input")
+            || text.contains("needs_attention")
+            || text.contains("awaiting_user_input")
+            || text.contains("requires_confirmation")
+            || text.contains("approval"),
+    }
 }
 
 fn truncate_text(input: &str, max_chars: usize) -> String {
@@ -1111,6 +1201,28 @@ fn system_time_to_millis(time: SystemTime) -> Option<i64> {
         .map(|duration| duration.as_millis() as i64)
 }
 
+fn codex_rollout_file_open_by_codex_throttled(
+    path: &Path,
+    now_ms: i64,
+    cache: &mut HashMap<PathBuf, LsofProbeCache>,
+) -> Option<bool> {
+    if let Some(cached) = cache.get(path) {
+        if now_ms.saturating_sub(cached.checked_at) <= LSOF_RESULT_CACHE_TTL_MS {
+            return cached.result;
+        }
+    }
+
+    let result = codex_rollout_file_open_by_codex(path);
+    cache.insert(
+        path.to_path_buf(),
+        LsofProbeCache {
+            result,
+            checked_at: now_ms,
+        },
+    );
+    result
+}
+
 fn codex_rollout_file_open_by_codex(path: &Path) -> Option<bool> {
     if !(cfg!(target_os = "macos") || cfg!(target_os = "linux")) {
         return None;
@@ -1179,6 +1291,7 @@ fn any_codex_process_running() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use uuid::Uuid;
 
     fn write_session(lines: &[&str]) -> PathBuf {
@@ -1284,5 +1397,28 @@ mod tests {
             ),
             Some(CodexAgentEventType::AgentIdle)
         );
+    }
+
+    #[test]
+    fn classify_entry_reuses_single_payload_text_for_error_and_attention() {
+        let value = json!({
+            "message": "Tool failed and requires_confirmation from user"
+        });
+        let classification = classify_entry(&value);
+
+        assert!(classification.indicates_error);
+        assert!(classification.indicates_needs_attention);
+    }
+
+    #[test]
+    fn classify_entry_treats_is_error_as_error_without_keywords() {
+        let value = json!({
+            "is_error": true,
+            "message": "plain output"
+        });
+        let classification = classify_entry(&value);
+
+        assert!(classification.indicates_error);
+        assert!(!classification.indicates_needs_attention);
     }
 }

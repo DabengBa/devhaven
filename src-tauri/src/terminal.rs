@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::io::{Read, Write};
+use std::time::{Duration, Instant};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Serialize;
@@ -12,6 +13,8 @@ use uuid::Uuid;
 
 const TERMINAL_OUTPUT_EVENT: &str = "terminal-output";
 const TERMINAL_EXIT_EVENT: &str = "terminal-exit";
+const TERMINAL_OUTPUT_BATCH_MS: u64 = 8;
+const TERMINAL_OUTPUT_BATCH_MAX_BYTES: usize = 32 * 1024;
 
 /// 将 PTY 的字节流按 UTF-8 逐步解码。
 ///
@@ -99,6 +102,26 @@ struct TerminalOutputPayload {
 struct TerminalExitPayload {
     session_id: String,
     code: Option<i32>,
+}
+
+fn emit_terminal_output(
+    app_handle: &AppHandle,
+    window_label: &str,
+    session_id: &str,
+    data: &mut String,
+) {
+    if data.is_empty() {
+        return;
+    }
+
+    let _ = app_handle.emit_to(
+        window_label,
+        TERMINAL_OUTPUT_EVENT,
+        TerminalOutputPayload {
+            session_id: session_id.to_string(),
+            data: std::mem::take(data),
+        },
+    );
 }
 
 fn default_shell() -> String {
@@ -341,44 +364,91 @@ pub fn terminal_create_session(
     let session_for_output = session.clone();
 
     thread::spawn(move || {
-        let mut reader = reader;
-        let mut buffer = [0u8; 8192];
-        let mut pending_utf8: Vec<u8> = Vec::new();
+        let batch_window = Duration::from_millis(TERMINAL_OUTPUT_BATCH_MS);
+        let (output_tx, output_rx) = mpsc::channel::<String>();
+
+        let reader_thread = thread::spawn(move || {
+            let mut reader = reader;
+            let mut buffer = [0u8; 8192];
+            let mut pending_utf8: Vec<u8> = Vec::new();
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(size) => {
+                        pending_utf8.extend_from_slice(&buffer[..size]);
+                        let data = drain_utf8_stream(&mut pending_utf8);
+                        if !data.is_empty() && output_tx.send(data).is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // 尽量不要丢尾巴：如果最后残留了半个字符（或非法字节），用 lossy 方式吐出来。
+            if !pending_utf8.is_empty() {
+                let data = String::from_utf8_lossy(&pending_utf8).to_string();
+                if !data.is_empty() {
+                    let _ = output_tx.send(data);
+                }
+            }
+        });
+
+        let mut batch_data = String::new();
+        let mut batch_started_at: Option<Instant> = None;
         loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(size) => {
-                    pending_utf8.extend_from_slice(&buffer[..size]);
-                    let data = drain_utf8_stream(&mut pending_utf8);
-                    if !data.is_empty() {
-                        let _ = app_handle.emit_to(
+            // 微批量策略：第一个 chunk 到达后，最多等待 8ms 聚合后统一 emit；
+            // 若流持续不断，则按窗口周期强制 flush，避免事件风暴并控制 UI 延迟。
+            let wait_timeout = batch_started_at
+                .map(|started| batch_window.saturating_sub(started.elapsed()))
+                .unwrap_or(batch_window);
+
+            match output_rx.recv_timeout(wait_timeout) {
+                Ok(chunk) => {
+                    if batch_started_at.is_none() {
+                        batch_started_at = Some(Instant::now());
+                    }
+                    batch_data.push_str(&chunk);
+
+                    let should_flush_by_time = batch_started_at
+                        .map(|started| started.elapsed() >= batch_window)
+                        .unwrap_or(false);
+                    let should_flush_by_size =
+                        batch_data.len() >= TERMINAL_OUTPUT_BATCH_MAX_BYTES;
+
+                    // 高吞吐下除了 8ms 窗口，还按字节阈值强制 flush，避免单批过大。
+                    if should_flush_by_time || should_flush_by_size {
+                        emit_terminal_output(
+                            &app_handle,
                             &window_label_for_output,
-                            TERMINAL_OUTPUT_EVENT,
-                            TerminalOutputPayload {
-                                session_id: session_id_for_output.clone(),
-                                data,
-                            },
+                            &session_id_for_output,
+                            &mut batch_data,
                         );
+                        batch_started_at = None;
                     }
                 }
-                Err(_) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    emit_terminal_output(
+                        &app_handle,
+                        &window_label_for_output,
+                        &session_id_for_output,
+                        &mut batch_data,
+                    );
+                    batch_started_at = None;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // reader 结束后，先刷完缓存，再进入 exit 事件，保证输出完整有序。
+                    emit_terminal_output(
+                        &app_handle,
+                        &window_label_for_output,
+                        &session_id_for_output,
+                        &mut batch_data,
+                    );
+                    break;
+                }
             }
         }
-
-        // 尽量不要丢尾巴：如果最后残留了半个字符（或非法字节），用 lossy 方式吐出来。
-        if !pending_utf8.is_empty() {
-            let data = String::from_utf8_lossy(&pending_utf8).to_string();
-            if !data.is_empty() {
-                let _ = app_handle.emit_to(
-                    &window_label_for_output,
-                    TERMINAL_OUTPUT_EVENT,
-                    TerminalOutputPayload {
-                        session_id: session_id_for_output.clone(),
-                        data,
-                    },
-                );
-            }
-        }
+        let _ = reader_thread.join();
 
         let exit_code = match session_for_output.child.lock() {
             Ok(mut child) => child.wait().ok().map(|status| status.exit_code() as i32),
@@ -416,13 +486,16 @@ pub fn terminal_write(
     pty_id: String,
     data: String,
 ) -> Result<(), String> {
-    let sessions = state
-        .sessions
-        .lock()
-        .map_err(|_| "终端会话锁定失败".to_string())?;
-    let session = sessions
-        .get(&pty_id)
-        .ok_or_else(|| "终端会话不存在".to_string())?;
+    let session = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "终端会话锁定失败".to_string())?;
+        sessions
+            .get(&pty_id)
+            .cloned()
+            .ok_or_else(|| "终端会话不存在".to_string())?
+    };
     let mut writer = session
         .writer
         .lock()
@@ -443,13 +516,16 @@ pub fn terminal_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let sessions = state
-        .sessions
-        .lock()
-        .map_err(|_| "终端会话锁定失败".to_string())?;
-    let session = sessions
-        .get(&pty_id)
-        .ok_or_else(|| "终端会话不存在".to_string())?;
+    let session = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "终端会话锁定失败".to_string())?;
+        sessions
+            .get(&pty_id)
+            .cloned()
+            .ok_or_else(|| "终端会话不存在".to_string())?
+    };
     let master = session
         .master
         .lock()

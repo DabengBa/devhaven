@@ -1,7 +1,9 @@
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::models::ProjectNotesPreview;
+use rayon::prelude::*;
 
 const NOTES_FILE: &str = "PROJECT_NOTES.md";
 const TODO_FILE: &str = "PROJECT_TODO.md";
@@ -29,23 +31,28 @@ pub fn write_todo(project_path: &str, todo: Option<String>) -> Result<(), String
 /// 批量读取项目备注首行预览，读取失败时返回空预览。
 pub fn read_notes_previews(project_paths: &[String]) -> Vec<ProjectNotesPreview> {
     project_paths
-        .iter()
+        .par_iter()
         .map(|path| ProjectNotesPreview {
             path: path.clone(),
-            notes_preview: read_notes(path)
-                .ok()
-                .flatten()
-                .and_then(|content| extract_preview_line(&content)),
+            notes_preview: read_notes_preview_line(path),
         })
         .collect()
 }
 
-fn extract_preview_line(content: &str) -> Option<String> {
-    content
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
+fn read_notes_preview_line(project_path: &str) -> Option<String> {
+    let target_path = Path::new(project_path).join(NOTES_FILE);
+    let file = fs::File::open(&target_path).ok()?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines() {
+        let line = line.ok()?;
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
 }
 
 fn read_optional_file(
