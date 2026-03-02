@@ -2,6 +2,7 @@ import type {
   FileExplorerPanelState,
   GitPanelState,
   QuickCommandsPanelState,
+  RunConfigurationState,
   RightSidebarState,
   SplitDirection,
   SplitNode,
@@ -14,6 +15,7 @@ import type {
 
 const FALLBACK_ID_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
 const DEFAULT_PANEL_OPEN = true;
+const DEFAULT_RUN_CONFIGURATION_SCRIPT_ID: string | null = null;
 const DEFAULT_FILE_PANEL_OPEN = false;
 const DEFAULT_FILE_PANEL_SHOW_HIDDEN = false;
 const DEFAULT_GIT_PANEL_OPEN = false;
@@ -144,6 +146,10 @@ export function normalizeWorkspaceUi(
     resolved.quickCommandsPanel,
     defaults?.defaultQuickCommandsPanelOpen ?? DEFAULT_PANEL_OPEN,
   );
+  const runConfiguration = normalizeRunConfiguration(
+    resolved.runConfiguration,
+    DEFAULT_RUN_CONFIGURATION_SCRIPT_ID,
+  );
   const filePanel = normalizeFileExplorerPanel(
     resolved.fileExplorerPanel,
     defaults?.defaultFileExplorerPanelOpen ?? DEFAULT_FILE_PANEL_OPEN,
@@ -179,6 +185,7 @@ export function normalizeWorkspaceUi(
   return {
     ...resolved,
     quickCommandsPanel: panel,
+    runConfiguration,
     fileExplorerPanel: syncedFilePanel,
     gitPanel: syncedGitPanel,
     rightSidebar,
@@ -194,6 +201,21 @@ function normalizeQuickCommandsPanel(value: unknown, defaultOpen: boolean): Quic
   const x = typeof asRecord.x === "number" ? asRecord.x : null;
   const y = typeof asRecord.y === "number" ? asRecord.y : null;
   return { open, x, y };
+}
+
+function normalizeRunConfiguration(
+  value: unknown,
+  defaultSelectedScriptId: string | null,
+): RunConfigurationState {
+  if (!value || typeof value !== "object") {
+    return { selectedScriptId: defaultSelectedScriptId };
+  }
+  const asRecord = value as Record<string, unknown>;
+  const selectedScriptId =
+    typeof asRecord.selectedScriptId === "string" && asRecord.selectedScriptId.trim().length > 0
+      ? asRecord.selectedScriptId
+      : defaultSelectedScriptId;
+  return { selectedScriptId };
 }
 
 function normalizeFileExplorerPanel(

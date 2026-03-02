@@ -30,9 +30,11 @@ import {
 } from "../../utils/terminalLayout";
 import { isInteractionLocked } from "../../utils/interactionLock";
 import { useQuickCommandDispatch } from "../../hooks/useQuickCommandDispatch";
-import { useQuickCommandPanel } from "../../hooks/useQuickCommandPanel";
-import { useQuickCommandRuntime } from "../../hooks/useQuickCommandRuntime";
-import QuickCommandsPanel from "./QuickCommandsPanel";
+import {
+  toScriptExecutionStateFromQuickState,
+  useQuickCommandRuntime,
+  type ScriptExecutionState,
+} from "../../hooks/useQuickCommandRuntime";
 import ResizablePanel from "./ResizablePanel";
 import SplitLayout from "./SplitLayout";
 import TerminalPane from "./TerminalPane";
@@ -380,11 +382,71 @@ function TerminalWorkspaceView({
     showPanelMessage,
   });
 
-  const panel = useQuickCommandPanel({
-    workspace,
-    defaultPanelOpen: workspaceDefaultsRef.current.defaultQuickCommandsPanelOpen,
-    updateWorkspace,
-  });
+  const setRunConfigurationScriptId = useCallback(
+    (scriptId: string | null) => {
+      const nextScriptId =
+        scriptId && scripts.some((script) => script.id === scriptId) ? scriptId : scripts[0]?.id ?? null;
+      updateWorkspace((current) => ({
+        ...current,
+        ui: {
+          ...current.ui,
+          runConfiguration: {
+            ...(current.ui?.runConfiguration ?? { selectedScriptId: null }),
+            selectedScriptId: nextScriptId,
+          },
+        },
+      }));
+    },
+    [scripts, updateWorkspace],
+  );
+
+  useEffect(() => {
+    if (!workspace) {
+      return;
+    }
+    const currentSelected = workspace.ui?.runConfiguration?.selectedScriptId ?? null;
+    const nextSelected =
+      currentSelected && scripts.some((script) => script.id === currentSelected)
+        ? currentSelected
+        : scripts[0]?.id ?? null;
+    if (currentSelected === nextSelected) {
+      return;
+    }
+    setRunConfigurationScriptId(nextSelected);
+  }, [scripts, setRunConfigurationScriptId, workspace]);
+
+  const runSelectedScript = useCallback(() => {
+    const current = workspaceRef.current;
+    const selectedScriptId = current?.ui?.runConfiguration?.selectedScriptId ?? null;
+    const resolvedScriptId =
+      selectedScriptId && scripts.some((script) => script.id === selectedScriptId)
+        ? selectedScriptId
+        : scripts[0]?.id ?? null;
+    if (!resolvedScriptId) {
+      showPanelMessage("暂无快捷命令，请在项目详情面板中配置");
+      return;
+    }
+    const selectedScript = scripts.find((script) => script.id === resolvedScriptId) ?? null;
+    if (!selectedScript) {
+      showPanelMessage("命令不存在或已被删除");
+      return;
+    }
+    runQuickCommand(selectedScript);
+  }, [runQuickCommand, scripts, showPanelMessage]);
+
+  const stopSelectedScript = useCallback(() => {
+    const current = workspaceRef.current;
+    const selectedScriptId = current?.ui?.runConfiguration?.selectedScriptId ?? null;
+    const resolvedScriptId =
+      selectedScriptId && scripts.some((script) => script.id === selectedScriptId)
+        ? selectedScriptId
+        : scripts[0]?.id ?? null;
+    if (!resolvedScriptId) {
+      showPanelMessage("暂无快捷命令，请在项目详情面板中配置");
+      return;
+    }
+    stopScript(resolvedScriptId);
+  }, [scripts, showPanelMessage, stopScript]);
 
   const handleSelectTab = useCallback(
     (tabId: string) => {
@@ -520,26 +582,6 @@ function TerminalWorkspaceView({
       }
     },
     [cleanupRuntimeBySessionIds, closeSessionLayout, handleQuickCommandSessionExit],
-  );
-
-  const setQuickCommandsPanelOpen = useCallback(
-    (open: boolean) => {
-      updateWorkspace((current) => ({
-        ...current,
-        ui: {
-          ...current.ui,
-          quickCommandsPanel: {
-            ...(current.ui?.quickCommandsPanel ?? {
-              open: workspaceDefaultsRef.current.defaultQuickCommandsPanelOpen,
-              x: null,
-              y: null,
-            }),
-            open,
-          },
-        },
-      }));
-    },
-    [updateWorkspace],
   );
 
   const setFileExplorerShowHidden = useCallback(
@@ -764,13 +806,37 @@ function TerminalWorkspaceView({
     );
   }
 
-  const panelState = workspace.ui?.quickCommandsPanel ?? {
-    open: workspaceDefaultsRef.current.defaultQuickCommandsPanelOpen,
-    x: null,
-    y: null,
-  };
-  const panelOpen = Boolean(panelState.open);
-  const panelPosition = panel.panelDraft ?? { x: panelState.x ?? 12, y: panelState.y ?? 12 };
+  const runConfigurationState = workspace.ui?.runConfiguration ?? { selectedScriptId: null };
+  const selectedScriptId =
+    runConfigurationState.selectedScriptId &&
+    scripts.some((script) => script.id === runConfigurationState.selectedScriptId)
+      ? runConfigurationState.selectedScriptId
+      : scripts[0]?.id ?? null;
+  const selectedScript = selectedScriptId
+    ? scripts.find((script) => script.id === selectedScriptId) ?? null
+    : null;
+  const selectedRuntime = selectedScript ? scriptRuntimeById[selectedScript.id] ?? null : null;
+  const selectedRuntimeValid = selectedRuntime ? isScriptRuntimeValid(selectedRuntime) : false;
+  const selectedQuickJob = selectedScript ? quickCommandJobByScriptId[selectedScript.id] ?? null : null;
+  const selectedLocalPhase = selectedScript ? scriptLocalPhaseById[selectedScript.id] ?? null : null;
+  const selectedScriptState: ScriptExecutionState = !selectedScript
+    ? "idle"
+    : selectedQuickJob
+      ? toScriptExecutionStateFromQuickState(selectedQuickJob.state)
+      : selectedLocalPhase ?? (selectedRuntimeValid ? "running" : "idle");
+  const runDisabled =
+    !selectedScript ||
+    selectedScriptState === "starting" ||
+    selectedScriptState === "stoppingSoft" ||
+    selectedScriptState === "stoppingHard";
+  const stopDisabled =
+    !selectedScript ||
+    !(
+      selectedScriptState === "running" ||
+      selectedScriptState === "starting" ||
+      selectedScriptState === "stoppingSoft" ||
+      selectedScriptState === "stoppingHard"
+    );
 
   const filePanelState = workspace.ui?.fileExplorerPanel ?? {
     open: workspaceDefaultsRef.current.defaultFileExplorerPanelOpen,
@@ -791,12 +857,19 @@ function TerminalWorkspaceView({
         projectName={projectName}
         projectPath={projectPath}
         codexRunningCount={codexRunningCount}
-        panelOpen={panelOpen}
         rightSidebarOpen={rightSidebarOpen}
         rightSidebarTab={rightSidebarTab}
+        scripts={scripts}
+        selectedScriptId={selectedScriptId}
+        selectedScriptState={selectedScriptState}
+        quickCommandMessage={panelMessage}
+        runDisabled={runDisabled}
+        stopDisabled={stopDisabled}
         tabs={workspace.tabs}
         activeTabId={workspace.activeTabId}
-        onTogglePanel={() => setQuickCommandsPanelOpen(!panelOpen)}
+        onSelectScript={(scriptId) => setRunConfigurationScriptId(scriptId || null)}
+        onRunScript={runSelectedScript}
+        onStopScript={stopSelectedScript}
         onToggleRightSidebar={() => {
           if (rightSidebarOpen) {
             requestCloseRightSidebar();
@@ -808,94 +881,76 @@ function TerminalWorkspaceView({
         onNewTab={handleNewTab}
         onCloseTab={handleCloseTab}
       />
-      <div ref={panel.stageRef} className="relative flex min-h-0 flex-1">
-        {panelOpen ? (
-          <QuickCommandsPanel
-            scripts={scripts}
-            scriptRuntimeById={scriptRuntimeById}
-            quickCommandJobByScriptId={quickCommandJobByScriptId}
-            scriptLocalPhaseById={scriptLocalPhaseById}
-            panelMessage={panelMessage}
-            panelPosition={panelPosition}
-            isScriptRuntimeValid={isScriptRuntimeValid}
-            onRun={runQuickCommand}
-            onStop={stopScript}
-            onClose={() => setQuickCommandsPanelOpen(false)}
-            onDragStart={panel.beginDragQuickCommandsPanel}
-            panelRef={panel.panelRef}
-          />
-        ) : null}
-        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-          <div className="relative flex min-h-0 min-w-0 flex-1">
-            {workspace.tabs.map((tab) => (
-              <div
-                key={tab.id}
-                className={`absolute inset-0 flex min-h-0 flex-1 ${
-                  tab.id === workspace.activeTabId ? "opacity-100" : "opacity-0 pointer-events-none"
-                }`}
-              >
-                <SplitLayout
-                  root={tab.root}
-                  activeSessionId={tab.activeSessionId}
-                  onActivate={(sessionId) => handleActivateSession(tab.id, sessionId)}
-                  onResize={handleResize}
-                  renderPane={(sessionId, isPaneActive) => (
-                    <TerminalPane
-                      sessionId={sessionId}
-                      cwd={workspace.sessions[sessionId]?.cwd ?? workspace.projectPath}
-                      savedState={workspace.sessions[sessionId]?.savedState ?? null}
-                      windowLabel={windowLabel}
-                      useWebgl={appState.settings.terminalUseWebglRenderer && tab.id === workspace.activeTabId}
-                      theme={xtermTheme}
-                      isActive={tab.id === workspace.activeTabId && isPaneActive}
-                      onActivate={(nextSessionId) => handleActivateSession(tab.id, nextSessionId)}
-                      onPtyReady={handlePtyReady}
-                      onExit={handleSessionExit}
-                      onRegisterSnapshotProvider={registerSnapshotProvider}
-                    />
-                  )}
-                />
-              </div>
-            ))}
-          </div>
-          {rightSidebarOpen ? (
-            <ResizablePanel
-              width={rightSidebarWidth}
-              onWidthChange={setRightSidebarWidth}
-              minWidth={MIN_RIGHT_SIDEBAR_WIDTH}
-              maxWidth={MAX_RIGHT_SIDEBAR_WIDTH}
-              handleSide="left"
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        <div className="relative flex min-h-0 min-w-0 flex-1">
+          {workspace.tabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={`absolute inset-0 flex min-h-0 flex-1 ${
+                tab.id === workspace.activeTabId ? "opacity-100" : "opacity-0 pointer-events-none"
+              }`}
             >
-              <TerminalRightSidebar
-                projectPath={projectPath}
-                isGitRepo={isGitRepo}
-                sidebarWidth={rightSidebarWidth}
-                activeTab={rightSidebarTab}
-                previewDirty={previewDirty}
-                previewFilePath={previewFilePath}
-                showHidden={Boolean(filePanelState.showHidden)}
-                onToggleShowHidden={setFileExplorerShowHidden}
-                onSelectFile={(relativePath) => {
-                  if (previewDirty && relativePath !== previewFilePath) {
-                    const ok = window.confirm("当前文件有未保存修改，确定切换文件？");
-                    if (!ok) {
-                      return;
-                    }
-                  }
-                  setPreviewFilePath(relativePath);
-                  setPreviewDirty(false);
-                }}
-                onClosePreview={() => {
-                  setPreviewFilePath(null);
-                  setPreviewDirty(false);
-                }}
-                onPreviewDirtyChange={setPreviewDirty}
-                onChangeTab={setRightSidebarTab}
-                onClose={requestCloseRightSidebar}
+              <SplitLayout
+                root={tab.root}
+                activeSessionId={tab.activeSessionId}
+                onActivate={(sessionId) => handleActivateSession(tab.id, sessionId)}
+                onResize={handleResize}
+                renderPane={(sessionId, isPaneActive) => (
+                  <TerminalPane
+                    sessionId={sessionId}
+                    cwd={workspace.sessions[sessionId]?.cwd ?? workspace.projectPath}
+                    savedState={workspace.sessions[sessionId]?.savedState ?? null}
+                    windowLabel={windowLabel}
+                    useWebgl={appState.settings.terminalUseWebglRenderer && tab.id === workspace.activeTabId}
+                    theme={xtermTheme}
+                    isActive={tab.id === workspace.activeTabId && isPaneActive}
+                    onActivate={(nextSessionId) => handleActivateSession(tab.id, nextSessionId)}
+                    onPtyReady={handlePtyReady}
+                    onExit={handleSessionExit}
+                    onRegisterSnapshotProvider={registerSnapshotProvider}
+                  />
+                )}
               />
-            </ResizablePanel>
-          ) : null}
+            </div>
+          ))}
         </div>
+        {rightSidebarOpen ? (
+          <ResizablePanel
+            width={rightSidebarWidth}
+            onWidthChange={setRightSidebarWidth}
+            minWidth={MIN_RIGHT_SIDEBAR_WIDTH}
+            maxWidth={MAX_RIGHT_SIDEBAR_WIDTH}
+            handleSide="left"
+          >
+            <TerminalRightSidebar
+              projectPath={projectPath}
+              isGitRepo={isGitRepo}
+              sidebarWidth={rightSidebarWidth}
+              activeTab={rightSidebarTab}
+              previewDirty={previewDirty}
+              previewFilePath={previewFilePath}
+              showHidden={Boolean(filePanelState.showHidden)}
+              onToggleShowHidden={setFileExplorerShowHidden}
+              onSelectFile={(relativePath) => {
+                if (previewDirty && relativePath !== previewFilePath) {
+                  const ok = window.confirm("当前文件有未保存修改，确定切换文件？");
+                  if (!ok) {
+                    return;
+                  }
+                }
+                setPreviewFilePath(relativePath);
+                setPreviewDirty(false);
+              }}
+              onClosePreview={() => {
+                setPreviewFilePath(null);
+                setPreviewDirty(false);
+              }}
+              onPreviewDirtyChange={setPreviewDirty}
+              onChangeTab={setRightSidebarTab}
+              onClose={requestCloseRightSidebar}
+            />
+          </ResizablePanel>
+        ) : null}
       </div>
     </div>
   );

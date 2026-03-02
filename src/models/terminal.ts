@@ -32,6 +32,10 @@ export type QuickCommandsPanelState = {
   y: number | null;
 };
 
+export type RunConfigurationState = {
+  selectedScriptId: string | null;
+};
+
 export type FileExplorerPanelState = {
   open: boolean;
   showHidden: boolean;
@@ -51,6 +55,7 @@ export type RightSidebarState = {
 
 export type TerminalWorkspaceUi = {
   quickCommandsPanel?: QuickCommandsPanelState;
+  runConfiguration?: RunConfigurationState;
   fileExplorerPanel?: FileExplorerPanelState;
   gitPanel?: GitPanelState;
   rightSidebar?: RightSidebarState;
