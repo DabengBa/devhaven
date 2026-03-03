@@ -50,7 +50,9 @@
       "mcp__serena__onboarding",
       "Bash(ls:*)",
       "Bash(npx tsc:*)",
-      "Bash(do git:*)"
+      "Bash(do git:*)",
+      "mcp__serena__find_symbol",
+      "Bash(python3:*)"
     ]
   }
 }

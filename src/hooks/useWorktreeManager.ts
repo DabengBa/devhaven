@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 
 import type { WorktreeCreateSubmitPayload, WorktreeCreateSubmitResult } from "../components/terminal/WorktreeCreateDialog";
 import type { Project, ProjectWorktree } from "../models/types";
@@ -12,6 +13,7 @@ import {
   worktreeInitCreate,
   type WorktreeInitProgressPayload,
 } from "../services/worktreeInit";
+import type { InteractionLockState } from "../services/interactionLock";
 import {
   buildReadyWorktree,
   buildTrackedWorktreeFromGitItem,
@@ -250,22 +252,23 @@ export function useWorktreeManager({
     [addProjectWorktree, openTerminalWorkspace, projectMap, setTerminalGitWorktreesByProjectId, showToast],
   );
 
-  useEffect(() => {
-    for (const project of projects) {
-      if (isWorktreeProject(project)) {
-        continue;
-      }
-      if (worktreeRecoveryCheckedProjectIdsRef.current.has(project.id)) {
-        continue;
-      }
+  // 恢复处于 "creating" 悬挂状态的 worktree：检查 git 实际状态并更新。
+  const recoverCreatingWorktrees = useCallback(
+    async (targetProjects: Project[], options?: { skipCheckedGuard?: boolean }) => {
+      for (const project of targetProjects) {
+        if (isWorktreeProject(project)) {
+          continue;
+        }
+        if (!options?.skipCheckedGuard && worktreeRecoveryCheckedProjectIdsRef.current.has(project.id)) {
+          continue;
+        }
 
-      const pendingWorktrees = (project.worktrees ?? []).filter((item) => item.status === "creating");
-      if (pendingWorktrees.length === 0) {
-        continue;
-      }
+        const pendingWorktrees = (project.worktrees ?? []).filter((item) => item.status === "creating");
+        if (pendingWorktrees.length === 0) {
+          continue;
+        }
 
-      worktreeRecoveryCheckedProjectIdsRef.current.add(project.id);
-      void (async () => {
+        worktreeRecoveryCheckedProjectIdsRef.current.add(project.id);
         let gitItems: GitWorktreeListItem[] = [];
         try {
           gitItems = await gitWorktreeList(project.path);
@@ -281,14 +284,51 @@ export function useWorktreeManager({
             ...item,
             status: existsInGit ? "ready" : "failed",
             initStep: existsInGit ? "ready" : "failed",
-            initMessage: existsInGit ? "检测到该 worktree 已创建完成" : "创建进度中断，请点击“重试”继续",
+            initMessage: existsInGit ? "检测到该 worktree 已创建完成" : "创建进度中断，请点击\u201c重试\u201d继续",
             initError: existsInGit ? null : "创建任务在应用重启后中断",
             updatedAt: now,
           });
         }
-      })();
-    }
-  }, [addProjectWorktree, projects]);
+      }
+    },
+    [addProjectWorktree],
+  );
+
+  // 挂载时恢复：首次检查每个项目的悬挂 worktree。
+  useEffect(() => {
+    void recoverCreatingWorktrees(projects);
+  }, [projects, recoverCreatingWorktrees]);
+
+  // 交互锁释放时恢复：后端任务完成后锁释放，此时重新检查所有 "creating" 的 worktree，
+  // 以修复因事件丢失导致的悬挂状态。
+  const recoverOnLockReleaseRef = useRef(() => {
+    void recoverCreatingWorktrees(projects, { skipCheckedGuard: true });
+  });
+  useEffect(() => {
+    recoverOnLockReleaseRef.current = () => {
+      void recoverCreatingWorktrees(projects, { skipCheckedGuard: true });
+    };
+  });
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    const register = async () => {
+      try {
+        unlisten = await listen<InteractionLockState>("interaction-lock", (event) => {
+          if (!event.payload.locked) {
+            recoverOnLockReleaseRef.current();
+          }
+        });
+      } catch (error) {
+        console.warn("监听交互锁事件失败。", error);
+      }
+    };
+
+    void register();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   const handleWorktreeInitProgress = useCallback(
     async (payload: WorktreeInitProgressPayload) => {
@@ -397,12 +437,19 @@ export function useWorktreeManager({
     ],
   );
 
+  // 使用 ref 持有最新的 handler，避免每次 projectMap 等依赖变化时重新注册监听器。
+  // 频繁 unlisten/listen 会在异步注册间隙丢失后端事件（尤其是 ready），导致 worktree 卡在 creating 状态。
+  const handleWorktreeInitProgressRef = useRef(handleWorktreeInitProgress);
+  useEffect(() => {
+    handleWorktreeInitProgressRef.current = handleWorktreeInitProgress;
+  });
+
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     const registerListener = async () => {
       try {
         unlisten = await listenWorktreeInitProgress((event) => {
-          void handleWorktreeInitProgress(event.payload);
+          void handleWorktreeInitProgressRef.current(event.payload);
         });
       } catch (error) {
         console.error("监听 worktree 初始化进度失败。", error);
@@ -413,7 +460,7 @@ export function useWorktreeManager({
     return () => {
       unlisten?.();
     };
-  }, [handleWorktreeInitProgress]);
+  }, []);
 
   const handleRetryWorktreeFromProject = useCallback(
     async (projectId: string, worktreePath: string) => {
@@ -536,7 +583,7 @@ export function useWorktreeManager({
         });
       } catch (error) {
         const message = resolveErrorMessage(error);
-        const forceConfirmed = await confirm(`删除失败：${message || "未知错误"}\n\n是否尝试“强制删除”？（可能丢失未提交修改）`, {
+        const forceConfirmed = await confirm(`删除失败：${message || "未知错误"}\n\n是否尝试"强制删除"？（可能丢失未提交修改）`, {
           title: "删除 worktree",
           kind: "warning",
           okLabel: "强制删除",
