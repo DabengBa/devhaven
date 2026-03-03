@@ -12,10 +12,11 @@ import {
 } from "../services/quickCommands";
 import { killTerminal, writeTerminal } from "../services/terminal";
 import { renderScriptTemplateCommand } from "../utils/scriptTemplate";
-import { createId, findPanePath } from "../utils/terminalLayout";
+import { createId } from "../utils/terminalLayout";
 
 const QUICK_COMMAND_FORCE_KILL_TIMEOUT_MS = 1500;
 const QUICK_COMMAND_RECONCILE_INTERVAL_MS = 10000;
+const DEFAULT_RUN_PANEL_HEIGHT = 240;
 
 export type ScriptRuntime = {
   jobId: string;
@@ -116,6 +117,10 @@ function wrapQuickCommandForShell(command: string, environment?: Record<string, 
 
   // 用一次性 shell 执行命令并主动退出，统一依赖 terminal-exit 回收运行态。
   return envPrefix + `sh -lc ${shellQuote(normalized)}; exit $?`;
+}
+
+function getRunPanelState(workspace: TerminalWorkspace) {
+  return workspace.ui?.runPanel ?? { open: false, height: DEFAULT_RUN_PANEL_HEIGHT, activeTabId: null, tabs: [] };
 }
 
 export function useQuickCommandRuntime({
@@ -422,11 +427,12 @@ export function useQuickCommandRuntime({
     if (!current.sessions[runtime.sessionId]) {
       return false;
     }
-    const tab = current.tabs.find((item) => item.id === runtime.tabId);
-    if (!tab) {
+    const runPanel = getRunPanelState(current);
+    const runTab = runPanel.tabs.find((item) => item.id === runtime.tabId);
+    if (!runTab) {
       return false;
     }
-    return findPanePath(tab.root, runtime.sessionId) !== null;
+    return runTab.sessionId === runtime.sessionId;
   }, []);
 
   const handleSessionExit = useCallback(
@@ -533,15 +539,20 @@ export function useQuickCommandRuntime({
       const existing = scriptRuntimeByIdRef.current[script.id] ?? null;
       if (existing && isScriptRuntimeValid(existing)) {
         pendingStopAfterStartByScriptIdRef.current.delete(script.id);
-        showPanelMessage("命令已在运行，已切换到对应终端");
+        showPanelMessage("命令已在运行，已切换到对应运行标签");
         updateWorkspace((ws) => {
-          const nextTabs = ws.tabs.map((tab) => {
-            if (tab.id !== existing.tabId) {
-              return tab;
-            }
-            return tab.activeSessionId === existing.sessionId ? tab : { ...tab, activeSessionId: existing.sessionId };
-          });
-          return { ...ws, activeTabId: existing.tabId, tabs: nextTabs };
+          const currentRunPanel = getRunPanelState(ws);
+          return {
+            ...ws,
+            ui: {
+              ...(ws.ui ?? {}),
+              runPanel: {
+                ...currentRunPanel,
+                open: true,
+                activeTabId: existing.tabId,
+              },
+            },
+          };
         });
         return;
       }
@@ -611,17 +622,33 @@ export function useQuickCommandRuntime({
         clearScriptLocalPhase([script.id]);
 
         updateWorkspace((ws) => {
-          const title = script.name.trim() ? script.name.trim() : `命令 ${ws.tabs.length + 1}`;
+          const currentRunPanel = getRunPanelState(ws);
+          const title = script.name.trim() ? script.name.trim() : `运行 ${currentRunPanel.tabs.length + 1}`;
           return {
             ...ws,
-            activeTabId: tabId,
-            tabs: [
-              ...ws.tabs,
-              { id: tabId, title, root: { type: "pane", sessionId }, activeSessionId: sessionId },
-            ],
             sessions: {
               ...ws.sessions,
               [sessionId]: { id: sessionId, cwd: ws.projectPath, savedState: null },
+            },
+            ui: {
+              ...(ws.ui ?? {}),
+              runPanel: {
+                ...currentRunPanel,
+                open: true,
+                activeTabId: tabId,
+                tabs: [
+                  ...currentRunPanel.tabs,
+                  {
+                    id: tabId,
+                    title,
+                    sessionId,
+                    scriptId: script.id,
+                    createdAt: Date.now(),
+                    endedAt: null,
+                    exitCode: null,
+                  },
+                ],
+              },
             },
           };
         });

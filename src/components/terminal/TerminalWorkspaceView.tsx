@@ -4,11 +4,13 @@ import {
   useEffect,
   useRef,
   useState,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { ITheme } from "xterm";
 
 import type { TerminalQuickCommandDispatch } from "../../models/quickCommands";
 import type {
+  RunPanelState,
   RightSidebarState,
   SplitDirection,
   TerminalRightSidebarTab,
@@ -42,9 +44,11 @@ import {
   useQuickCommandRuntime,
   type ScriptExecutionState,
 } from "../../hooks/useQuickCommandRuntime";
+import { IconChevronDown } from "../Icons";
 import ResizablePanel from "./ResizablePanel";
 import SplitLayout from "./SplitLayout";
 import TerminalPane from "./TerminalPane";
+import TerminalRunPanel from "./TerminalRunPanel";
 import TerminalRightSidebar from "./TerminalRightSidebar";
 import TerminalWorkspaceHeader from "./TerminalWorkspaceHeader";
 
@@ -78,6 +82,13 @@ const DEFAULT_RIGHT_SIDEBAR: RightSidebarState = {
   width: 520,
   tab: "files",
 };
+const DEFAULT_RUN_PANEL: RunPanelState = {
+  open: false,
+  height: 240,
+  activeTabId: null,
+  tabs: [],
+};
+const MIN_RUN_PANEL_HEIGHT = 140;
 const MIN_RIGHT_SIDEBAR_WIDTH = 360;
 const MAX_RIGHT_SIDEBAR_WIDTH = 960;
 
@@ -113,6 +124,10 @@ function getNextTerminalTitle(tabs: TerminalWorkspace["tabs"]) {
     next += 1;
   }
   return `终端 ${next}`;
+}
+
+function getRunPanelState(workspace: TerminalWorkspace) {
+  return workspace.ui?.runPanel ?? DEFAULT_RUN_PANEL;
 }
 
 function areTerminalWorkspaceViewPropsEqual(
@@ -177,15 +192,16 @@ function TerminalWorkspaceView({
 }: TerminalWorkspaceViewProps) {
   const { appState } = useDevHavenContext();
   const workspaceDefaultsRef = useRef<{
-    defaultQuickCommandsPanelOpen: boolean;
+    defaultRunPanelOpen: boolean;
+    defaultRunPanelHeight: number;
     defaultFileExplorerPanelOpen: boolean;
     defaultFileExplorerShowHidden: boolean;
   }>({
-    defaultQuickCommandsPanelOpen: scripts.length > 0,
+    defaultRunPanelOpen: false,
+    defaultRunPanelHeight: DEFAULT_RUN_PANEL.height,
     defaultFileExplorerPanelOpen: false,
     defaultFileExplorerShowHidden: false,
   });
-  workspaceDefaultsRef.current.defaultQuickCommandsPanelOpen = scripts.length > 0;
 
   const [workspace, setWorkspace] = useState<TerminalWorkspace | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -393,11 +409,24 @@ function TerminalWorkspaceView({
         if (!updatedRoot) {
           const remainingTabs = currentWorkspace.tabs.filter((item) => item.id !== tab.id);
           if (remainingTabs.length === 0) {
-            return createDefaultWorkspace(
-              currentWorkspace.projectPath,
-              currentWorkspace.projectId,
-              workspaceDefaultsRef.current,
-            );
+            const nextSessionId = createId();
+            const nextTabId = createId();
+            return {
+              ...currentWorkspace,
+              activeTabId: nextTabId,
+              tabs: [
+                {
+                  id: nextTabId,
+                  title: "终端 1",
+                  root: { type: "pane", sessionId: nextSessionId },
+                  activeSessionId: nextSessionId,
+                },
+              ],
+              sessions: {
+                ...nextSessions,
+                [nextSessionId]: { id: nextSessionId, cwd: currentWorkspace.projectPath, savedState: null },
+              },
+            };
           }
           const nextActiveTabId =
             currentWorkspace.activeTabId === tab.id ? remainingTabs[0].id : currentWorkspace.activeTabId;
@@ -421,6 +450,47 @@ function TerminalWorkspaceView({
       });
 
       return removedSessions;
+    },
+    [updateWorkspace],
+  );
+
+  const closeRunPanelSession = useCallback(
+    (sessionId: string, options?: { closePanelWhenEmpty?: boolean }) => {
+      const current = workspaceRef.current;
+      if (!current) {
+        return false;
+      }
+      const currentRunPanel = getRunPanelState(current);
+      const targetTab = currentRunPanel.tabs.find((tab) => tab.sessionId === sessionId);
+      if (!targetTab) {
+        return false;
+      }
+      updateWorkspace((currentWorkspace) => {
+        const runPanel = getRunPanelState(currentWorkspace);
+        const target = runPanel.tabs.find((tab) => tab.sessionId === sessionId);
+        if (!target) {
+          return currentWorkspace;
+        }
+        const nextTabs = runPanel.tabs.filter((tab) => tab.id !== target.id);
+        const nextActiveTabId =
+          runPanel.activeTabId === target.id ? nextTabs[nextTabs.length - 1]?.id ?? null : runPanel.activeTabId;
+        const nextSessions = { ...currentWorkspace.sessions };
+        delete nextSessions[sessionId];
+        return {
+          ...currentWorkspace,
+          sessions: nextSessions,
+          ui: {
+            ...(currentWorkspace.ui ?? {}),
+            runPanel: {
+              ...runPanel,
+              tabs: nextTabs,
+              activeTabId: nextActiveTabId,
+              open: nextTabs.length > 0 ? runPanel.open : !(options?.closePanelWhenEmpty ?? true),
+            },
+          },
+        };
+      });
+      return true;
     },
     [updateWorkspace],
   );
@@ -466,6 +536,40 @@ function TerminalWorkspaceView({
     stopScript,
     showPanelMessage,
   });
+
+  useEffect(() => {
+    if (!workspace) {
+      return;
+    }
+    updateWorkspace((current) => {
+      const currentRunPanel = getRunPanelState(current);
+      const validTabs = currentRunPanel.tabs.filter((tab) => Boolean(current.sessions[tab.sessionId]));
+      const nextActiveTabId =
+        currentRunPanel.activeTabId && validTabs.some((tab) => tab.id === currentRunPanel.activeTabId)
+          ? currentRunPanel.activeTabId
+          : validTabs[validTabs.length - 1]?.id ?? null;
+      const nextOpen = validTabs.length > 0 ? currentRunPanel.open : false;
+      if (
+        validTabs.length === currentRunPanel.tabs.length &&
+        nextActiveTabId === currentRunPanel.activeTabId &&
+        nextOpen === currentRunPanel.open
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        ui: {
+          ...(current.ui ?? {}),
+          runPanel: {
+            ...currentRunPanel,
+            tabs: validTabs,
+            activeTabId: nextActiveTabId,
+            open: nextOpen,
+          },
+        },
+      };
+    });
+  }, [updateWorkspace, workspace]);
 
   const setRunConfigurationScriptId = useCallback(
     (scriptId: string | null) => {
@@ -823,6 +927,123 @@ function TerminalWorkspaceView({
     updateDialogDraft,
   ]);
 
+  const setRunPanelOpen = useCallback(
+    (open: boolean) => {
+      updateWorkspace((current) => {
+        const runPanel = getRunPanelState(current);
+        if (runPanel.open === open) {
+          return current;
+        }
+        return {
+          ...current,
+          ui: {
+            ...(current.ui ?? {}),
+            runPanel: {
+              ...runPanel,
+              open,
+            },
+          },
+        };
+      });
+    },
+    [updateWorkspace],
+  );
+
+  const setRunPanelHeight = useCallback(
+    (height: number) => {
+      const normalizedHeight = Math.max(MIN_RUN_PANEL_HEIGHT, Math.min(720, Math.round(height)));
+      updateWorkspace((current) => {
+        const runPanel = getRunPanelState(current);
+        if (runPanel.height === normalizedHeight) {
+          return current;
+        }
+        return {
+          ...current,
+          ui: {
+            ...(current.ui ?? {}),
+            runPanel: {
+              ...runPanel,
+              height: normalizedHeight,
+            },
+          },
+        };
+      });
+    },
+    [updateWorkspace],
+  );
+
+  const handleSelectRunTab = useCallback(
+    (tabId: string) => {
+      updateWorkspace((current) => {
+        const runPanel = getRunPanelState(current);
+        if (!runPanel.tabs.some((tab) => tab.id === tabId)) {
+          return current;
+        }
+        return {
+          ...current,
+          ui: {
+            ...(current.ui ?? {}),
+            runPanel: {
+              ...runPanel,
+              open: true,
+              activeTabId: tabId,
+            },
+          },
+        };
+      });
+    },
+    [updateWorkspace],
+  );
+
+  const handleCloseRunTab = useCallback(
+    (tabId: string) => {
+      const current = workspaceRef.current;
+      if (!current) {
+        return;
+      }
+      const runPanel = getRunPanelState(current);
+      const targetTab = runPanel.tabs.find((tab) => tab.id === tabId);
+      if (!targetTab) {
+        return;
+      }
+      finalizeRuntimeBySessionIds([targetTab.sessionId], 130, "运行标签页已关闭");
+      cleanupRuntimeBySessionIds([targetTab.sessionId]);
+      closeRunPanelSession(targetTab.sessionId, { closePanelWhenEmpty: true });
+    },
+    [cleanupRuntimeBySessionIds, closeRunPanelSession, finalizeRuntimeBySessionIds],
+  );
+
+  const handleBeginResizeRunPanel = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      const current = workspaceRef.current;
+      if (!current) {
+        return;
+      }
+      const runPanel = getRunPanelState(current);
+      const startClientY = event.clientY;
+      const startHeight = runPanel.height;
+      const maxHeight = Math.max(MIN_RUN_PANEL_HEIGHT, window.innerHeight - 120);
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        const delta = startClientY - moveEvent.clientY;
+        const nextHeight = Math.max(MIN_RUN_PANEL_HEIGHT, Math.min(maxHeight, startHeight + delta));
+        setRunPanelHeight(nextHeight);
+      };
+      const handlePointerUp = () => {
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+      };
+
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", handlePointerUp);
+    },
+    [setRunPanelHeight],
+  );
+
   const handleSelectTab = useCallback(
     (tabId: string) => {
       updateWorkspace((current) => ({ ...current, activeTabId: tabId }));
@@ -868,11 +1089,28 @@ function TerminalWorkspaceView({
         const removedTab = currentWorkspace.tabs.find((tab) => tab.id === tabId);
         const removedSessionIds = removedTab ? collectSessionIds(removedTab.root) : [];
         if (remainingTabs.length === 0) {
-          return createDefaultWorkspace(
-            currentWorkspace.projectPath,
-            currentWorkspace.projectId,
-            workspaceDefaultsRef.current,
-          );
+          const nextSessions = { ...currentWorkspace.sessions };
+          removedSessionIds.forEach((sessionId) => {
+            delete nextSessions[sessionId];
+          });
+          const nextSessionId = createId();
+          const nextTabId = createId();
+          return {
+            ...currentWorkspace,
+            activeTabId: nextTabId,
+            tabs: [
+              {
+                id: nextTabId,
+                title: "终端 1",
+                root: { type: "pane", sessionId: nextSessionId },
+                activeSessionId: nextSessionId,
+              },
+            ],
+            sessions: {
+              ...nextSessions,
+              [nextSessionId]: { id: nextSessionId, cwd: currentWorkspace.projectPath, savedState: null },
+            },
+          };
         }
         const nextSessions = { ...currentWorkspace.sessions };
         removedSessionIds.forEach((sessionId) => {
@@ -950,13 +1188,42 @@ function TerminalWorkspaceView({
   const handleSessionExit = useCallback(
     (sessionId: string, code?: number | null) => {
       handleQuickCommandSessionExit(sessionId, code);
+      const current = workspaceRef.current;
+      const runPanel = current ? getRunPanelState(current) : null;
+      const runTab = runPanel?.tabs.find((tab) => tab.sessionId === sessionId) ?? null;
+      if (runTab) {
+        const resolvedCode = typeof code === "number" ? code : null;
+        updateWorkspace((currentWorkspace) => {
+          const currentRunPanel = getRunPanelState(currentWorkspace);
+          const nextTabs = currentRunPanel.tabs.map((tab) =>
+            tab.sessionId === sessionId
+              ? {
+                  ...tab,
+                  endedAt: Date.now(),
+                  exitCode: resolvedCode,
+                }
+              : tab,
+          );
+          return {
+            ...currentWorkspace,
+            ui: {
+              ...(currentWorkspace.ui ?? {}),
+              runPanel: {
+                ...currentRunPanel,
+                tabs: nextTabs,
+              },
+            },
+          };
+        });
+        return;
+      }
       const removedSessions = closeSessionLayout(sessionId);
       const extraRemovedSessions = removedSessions.filter((id) => id !== sessionId);
       if (extraRemovedSessions.length > 0) {
         cleanupRuntimeBySessionIds(extraRemovedSessions);
       }
     },
-    [cleanupRuntimeBySessionIds, closeSessionLayout, handleQuickCommandSessionExit],
+    [cleanupRuntimeBySessionIds, closeSessionLayout, handleQuickCommandSessionExit, updateWorkspace],
   );
 
   const setFileExplorerShowHidden = useCallback(
@@ -1212,6 +1479,14 @@ function TerminalWorkspaceView({
       selectedScriptState === "stoppingSoft" ||
       selectedScriptState === "stoppingHard"
     );
+  const runPanelState = workspace.ui?.runPanel ?? DEFAULT_RUN_PANEL;
+  const runPanelTabs = runPanelState.tabs;
+  const runPanelActiveTabId =
+    runPanelState.activeTabId && runPanelTabs.some((tab) => tab.id === runPanelState.activeTabId)
+      ? runPanelState.activeTabId
+      : runPanelTabs[runPanelTabs.length - 1]?.id ?? null;
+  const runPanelOpen = Boolean(runPanelState.open && runPanelTabs.length > 0);
+  const runPanelHeight = Math.max(MIN_RUN_PANEL_HEIGHT, Math.min(720, runPanelState.height));
 
   const filePanelState = workspace.ui?.fileExplorerPanel ?? {
     open: workspaceDefaultsRef.current.defaultFileExplorerPanelOpen,
@@ -1259,75 +1534,110 @@ function TerminalWorkspaceView({
         onNewTab={handleNewTab}
         onCloseTab={handleCloseTab}
       />
-      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        <div className="relative flex min-h-0 min-w-0 flex-1">
-          {workspace.tabs.map((tab) => (
-            <div
-              key={tab.id}
-              className={`absolute inset-0 flex min-h-0 flex-1 ${
-                tab.id === workspace.activeTabId ? "opacity-100" : "opacity-0 pointer-events-none"
-              }`}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          <div className="relative flex min-h-0 min-w-0 flex-1">
+            {workspace.tabs.map((tab) => (
+              <div
+                key={tab.id}
+                className={`absolute inset-0 flex min-h-0 flex-1 ${
+                  tab.id === workspace.activeTabId ? "opacity-100" : "opacity-0 pointer-events-none"
+                }`}
+              >
+                <SplitLayout
+                  root={tab.root}
+                  activeSessionId={tab.activeSessionId}
+                  onActivate={(sessionId) => handleActivateSession(tab.id, sessionId)}
+                  onResize={handleResize}
+                  renderPane={(sessionId, isPaneActive) => (
+                    <TerminalPane
+                      sessionId={sessionId}
+                      cwd={workspace.sessions[sessionId]?.cwd ?? workspace.projectPath}
+                      savedState={workspace.sessions[sessionId]?.savedState ?? null}
+                      windowLabel={windowLabel}
+                      useWebgl={appState.settings.terminalUseWebglRenderer && tab.id === workspace.activeTabId}
+                      theme={xtermTheme}
+                      isActive={tab.id === workspace.activeTabId && isPaneActive}
+                      onActivate={(nextSessionId) => handleActivateSession(tab.id, nextSessionId)}
+                      onPtyReady={handlePtyReady}
+                      onExit={handleSessionExit}
+                      onRegisterSnapshotProvider={registerSnapshotProvider}
+                    />
+                  )}
+                />
+              </div>
+            ))}
+          </div>
+          {rightSidebarOpen ? (
+            <ResizablePanel
+              width={rightSidebarWidth}
+              onWidthChange={setRightSidebarWidth}
+              minWidth={MIN_RIGHT_SIDEBAR_WIDTH}
+              maxWidth={MAX_RIGHT_SIDEBAR_WIDTH}
+              handleSide="left"
             >
-              <SplitLayout
-                root={tab.root}
-                activeSessionId={tab.activeSessionId}
-                onActivate={(sessionId) => handleActivateSession(tab.id, sessionId)}
-                onResize={handleResize}
-                renderPane={(sessionId, isPaneActive) => (
-                  <TerminalPane
-                    sessionId={sessionId}
-                    cwd={workspace.sessions[sessionId]?.cwd ?? workspace.projectPath}
-                    savedState={workspace.sessions[sessionId]?.savedState ?? null}
-                    windowLabel={windowLabel}
-                    useWebgl={appState.settings.terminalUseWebglRenderer && tab.id === workspace.activeTabId}
-                    theme={xtermTheme}
-                    isActive={tab.id === workspace.activeTabId && isPaneActive}
-                    onActivate={(nextSessionId) => handleActivateSession(tab.id, nextSessionId)}
-                    onPtyReady={handlePtyReady}
-                    onExit={handleSessionExit}
-                    onRegisterSnapshotProvider={registerSnapshotProvider}
-                  />
-                )}
-              />
-            </div>
-          ))}
-        </div>
-        {rightSidebarOpen ? (
-          <ResizablePanel
-            width={rightSidebarWidth}
-            onWidthChange={setRightSidebarWidth}
-            minWidth={MIN_RIGHT_SIDEBAR_WIDTH}
-            maxWidth={MAX_RIGHT_SIDEBAR_WIDTH}
-            handleSide="left"
-          >
-            <TerminalRightSidebar
-              projectPath={projectPath}
-              isGitRepo={isGitRepo}
-              sidebarWidth={rightSidebarWidth}
-              activeTab={rightSidebarTab}
-              previewDirty={previewDirty}
-              previewFilePath={previewFilePath}
-              showHidden={Boolean(filePanelState.showHidden)}
-              onToggleShowHidden={setFileExplorerShowHidden}
-              onSelectFile={(relativePath) => {
-                if (previewDirty && relativePath !== previewFilePath) {
-                  const ok = window.confirm("当前文件有未保存修改，确定切换文件？");
-                  if (!ok) {
-                    return;
+              <TerminalRightSidebar
+                projectPath={projectPath}
+                isGitRepo={isGitRepo}
+                sidebarWidth={rightSidebarWidth}
+                activeTab={rightSidebarTab}
+                previewDirty={previewDirty}
+                previewFilePath={previewFilePath}
+                showHidden={Boolean(filePanelState.showHidden)}
+                onToggleShowHidden={setFileExplorerShowHidden}
+                onSelectFile={(relativePath) => {
+                  if (previewDirty && relativePath !== previewFilePath) {
+                    const ok = window.confirm("当前文件有未保存修改，确定切换文件？");
+                    if (!ok) {
+                      return;
+                    }
                   }
-                }
-                setPreviewFilePath(relativePath);
-                setPreviewDirty(false);
-              }}
-              onClosePreview={() => {
-                setPreviewFilePath(null);
-                setPreviewDirty(false);
-              }}
-              onPreviewDirtyChange={setPreviewDirty}
-              onChangeTab={setRightSidebarTab}
-              onClose={requestCloseRightSidebar}
-            />
-          </ResizablePanel>
+                  setPreviewFilePath(relativePath);
+                  setPreviewDirty(false);
+                }}
+                onClosePreview={() => {
+                  setPreviewFilePath(null);
+                  setPreviewDirty(false);
+                }}
+                onPreviewDirtyChange={setPreviewDirty}
+                onChangeTab={setRightSidebarTab}
+                onClose={requestCloseRightSidebar}
+              />
+            </ResizablePanel>
+          ) : null}
+        </div>
+        {runPanelOpen ? (
+          <TerminalRunPanel
+            open
+            height={runPanelHeight}
+            tabs={runPanelTabs}
+            activeTabId={runPanelActiveTabId}
+            sessions={workspace.sessions}
+            projectPath={projectPath}
+            windowLabel={windowLabel}
+            xtermTheme={xtermTheme}
+            terminalUseWebglRenderer={appState.settings.terminalUseWebglRenderer}
+            scriptRuntimeById={scriptRuntimeById}
+            quickCommandJobByScriptId={quickCommandJobByScriptId}
+            scriptLocalPhaseById={scriptLocalPhaseById}
+            isScriptRuntimeValid={isScriptRuntimeValid}
+            onSelectTab={handleSelectRunTab}
+            onCloseTab={handleCloseRunTab}
+            onCollapse={() => setRunPanelOpen(false)}
+            onResizeStart={handleBeginResizeRunPanel}
+            onPtyReady={handlePtyReady}
+            onExit={handleSessionExit}
+            onRegisterSnapshotProvider={registerSnapshotProvider}
+          />
+        ) : runPanelTabs.length > 0 ? (
+          <button
+            type="button"
+            className="inline-flex h-8 shrink-0 items-center gap-1 border-t border-[var(--terminal-divider)] bg-[var(--terminal-panel-bg)] px-3 text-[11px] font-semibold text-[var(--terminal-muted-fg)] transition-colors hover:text-[var(--terminal-fg)]"
+            onClick={() => setRunPanelOpen(true)}
+          >
+            <IconChevronDown size={14} />
+            <span>显示运行面板（{runPanelTabs.length}）</span>
+          </button>
         ) : null}
       </div>
       {runConfigurationsDialog ? (

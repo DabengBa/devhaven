@@ -2,6 +2,7 @@ import type {
   FileExplorerPanelState,
   GitPanelState,
   QuickCommandsPanelState,
+  RunPanelState,
   RunConfigurationState,
   RightSidebarState,
   SplitDirection,
@@ -15,6 +16,8 @@ import type {
 
 const FALLBACK_ID_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
 const DEFAULT_PANEL_OPEN = true;
+const DEFAULT_RUN_PANEL_OPEN = false;
+const DEFAULT_RUN_PANEL_HEIGHT = 240;
 const DEFAULT_RUN_CONFIGURATION_SCRIPT_ID: string | null = null;
 const DEFAULT_FILE_PANEL_OPEN = false;
 const DEFAULT_FILE_PANEL_SHOW_HIDDEN = false;
@@ -25,6 +28,8 @@ const DEFAULT_RIGHT_SIDEBAR_TAB: TerminalRightSidebarTab = "files";
 
 export type TerminalWorkspaceDefaults = {
   defaultQuickCommandsPanelOpen?: boolean;
+  defaultRunPanelOpen?: boolean;
+  defaultRunPanelHeight?: number;
   defaultFileExplorerPanelOpen?: boolean;
   defaultFileExplorerShowHidden?: boolean;
   defaultGitPanelOpen?: boolean;
@@ -124,6 +129,13 @@ export function normalizeWorkspace(
   const activeTabId = tabs.some((tab) => tab.id === workspace.activeTabId)
     ? workspace.activeTabId
     : tabs[0].id;
+  const normalizedUi = normalizeWorkspaceUi(workspace.ui, defaults);
+  const normalizedRunTabs = normalizedUi.runPanel?.tabs ?? [];
+  normalizedRunTabs.forEach((tab) => {
+    if (!sessions[tab.sessionId]) {
+      sessions[tab.sessionId] = { id: tab.sessionId, cwd: projectPath, savedState: null };
+    }
+  });
   return {
     ...workspace,
     version: 1,
@@ -132,7 +144,7 @@ export function normalizeWorkspace(
     tabs,
     activeTabId,
     sessions,
-    ui: normalizeWorkspaceUi(workspace.ui, defaults),
+    ui: normalizedUi,
     updatedAt: workspace.updatedAt ?? Date.now(),
   };
 }
@@ -145,6 +157,14 @@ export function normalizeWorkspaceUi(
   const panel = normalizeQuickCommandsPanel(
     resolved.quickCommandsPanel,
     defaults?.defaultQuickCommandsPanelOpen ?? DEFAULT_PANEL_OPEN,
+  );
+  const runPanel = normalizeRunPanel(
+    resolved.runPanel,
+    panel,
+    {
+      open: defaults?.defaultRunPanelOpen ?? DEFAULT_RUN_PANEL_OPEN,
+      height: defaults?.defaultRunPanelHeight ?? DEFAULT_RUN_PANEL_HEIGHT,
+    },
   );
   const runConfiguration = normalizeRunConfiguration(
     resolved.runConfiguration,
@@ -185,6 +205,7 @@ export function normalizeWorkspaceUi(
   return {
     ...resolved,
     quickCommandsPanel: panel,
+    runPanel,
     runConfiguration,
     fileExplorerPanel: syncedFilePanel,
     gitPanel: syncedGitPanel,
@@ -216,6 +237,60 @@ function normalizeRunConfiguration(
       ? asRecord.selectedScriptId
       : defaultSelectedScriptId;
   return { selectedScriptId };
+}
+
+function normalizeRunPanel(
+  value: unknown,
+  legacyQuickPanel: QuickCommandsPanelState,
+  defaults: { open: boolean; height: number },
+): RunPanelState {
+  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  const open = record && typeof record.open === "boolean" ? record.open : legacyQuickPanel.open || defaults.open;
+  const heightCandidate = record && typeof record.height === "number" && Number.isFinite(record.height)
+    ? record.height
+    : defaults.height;
+  const safeHeight = Math.max(140, Math.min(720, Math.round(heightCandidate)));
+  const tabsRaw = record && Array.isArray(record.tabs) ? record.tabs : [];
+  const tabs: RunPanelState["tabs"] = [];
+  tabsRaw.forEach((tabValue) => {
+    if (!tabValue || typeof tabValue !== "object") {
+      return;
+    }
+    const tab = tabValue as Record<string, unknown>;
+    const id = typeof tab.id === "string" && tab.id.trim() ? tab.id.trim() : null;
+    const sessionId =
+      typeof tab.sessionId === "string" && tab.sessionId.trim() ? tab.sessionId.trim() : null;
+    const scriptId = typeof tab.scriptId === "string" && tab.scriptId.trim() ? tab.scriptId.trim() : null;
+    if (!id || !sessionId || !scriptId) {
+      return;
+    }
+    const titleCandidate = typeof tab.title === "string" ? tab.title.trim() : "";
+    const title = titleCandidate || "运行";
+    const createdAt =
+      typeof tab.createdAt === "number" && Number.isFinite(tab.createdAt) ? tab.createdAt : Date.now();
+    const endedAt =
+      typeof tab.endedAt === "number" && Number.isFinite(tab.endedAt) ? tab.endedAt : null;
+    const exitCode = typeof tab.exitCode === "number" ? tab.exitCode : tab.exitCode === null ? null : undefined;
+    tabs.push({
+      id,
+      sessionId,
+      scriptId,
+      title,
+      createdAt,
+      endedAt,
+      exitCode,
+    });
+  });
+  const activeTabCandidate = record && typeof record.activeTabId === "string" ? record.activeTabId.trim() : "";
+  const activeTabId = tabs.some((tab) => tab.id === activeTabCandidate)
+    ? activeTabCandidate
+    : tabs[0]?.id ?? null;
+  return {
+    open: tabs.length > 0 ? open : false,
+    height: safeHeight,
+    activeTabId,
+    tabs,
+  };
 }
 
 function normalizeFileExplorerPanel(

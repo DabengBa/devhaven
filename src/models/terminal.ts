@@ -32,6 +32,23 @@ export type QuickCommandsPanelState = {
   y: number | null;
 };
 
+export type RunPanelTab = {
+  id: string;
+  title: string;
+  sessionId: string;
+  scriptId: string;
+  createdAt: number;
+  endedAt?: number | null;
+  exitCode?: number | null;
+};
+
+export type RunPanelState = {
+  open: boolean;
+  height: number;
+  activeTabId: string | null;
+  tabs: RunPanelTab[];
+};
+
 export type RunConfigurationState = {
   selectedScriptId: string | null;
 };
@@ -55,6 +72,7 @@ export type RightSidebarState = {
 
 export type TerminalWorkspaceUi = {
   quickCommandsPanel?: QuickCommandsPanelState;
+  runPanel?: RunPanelState;
   runConfiguration?: RunConfigurationState;
   fileExplorerPanel?: FileExplorerPanelState;
   gitPanel?: GitPanelState;
