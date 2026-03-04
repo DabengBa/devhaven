@@ -250,10 +250,12 @@
 - [x] 将 `ide` 分支并入 `main`
 - [x] 升级应用版本到 `2.7.2`（`package.json` / `package-lock.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`）
 - [x] 执行发版前验证并记录结果
-- [ ] 提交版本发布变更、创建 `v2.7.2` tag、push 到远端
-- [ ] 确认 GitHub release workflow 已触发并记录结果
+- [x] 提交版本发布变更、创建 `v2.7.2` tag、push 到远端
+- [x] 确认 GitHub release workflow 已触发并记录结果
+- [x] 补充 `v2.7.2` release 说明（仓库文档 + GitHub Release body）
 
 ## Review
 - `ide` 当前是 `main` 的线性后继，本次按 fast-forward 并入，避免额外 merge commit 噪声。
 - 版本号已在前端、Tauri 配置与 Rust manifest/lock 四处同步到 `2.7.2`，保证本地构建与 CI/release 版本一致。
 - 发版前验证通过：`pnpm build`、`cargo check --manifest-path src-tauri/Cargo.toml --locked`。
+- release 流水线执行成功（ubuntu/macos/windows 三平台均成功），并已同步补齐 `v2.7.2` 发布说明。
