@@ -319,3 +319,28 @@ export function IconChevronsDownUp(props: IconProps) {
     </IconBase>
   );
 }
+
+export function IconPlay(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <polygon points="6 3 20 12 6 21" fill="currentColor" stroke="none" />
+    </IconBase>
+  );
+}
+
+export function IconSquareStop(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" stroke="none" />
+    </IconBase>
+  );
+}
+
+export function IconRerun(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <polyline points="21 3 21 9 15 9" />
+    </IconBase>
+  );
+}

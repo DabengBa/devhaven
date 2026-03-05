@@ -52,7 +52,8 @@
       "Bash(npx tsc:*)",
       "Bash(do git:*)",
       "mcp__serena__find_symbol",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(npx eslint:*)"
     ]
   }
 }

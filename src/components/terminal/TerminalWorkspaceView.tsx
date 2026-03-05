@@ -1488,6 +1488,33 @@ function TerminalWorkspaceView({
   const runPanelOpen = Boolean(runPanelState.open && runPanelTabs.length > 0);
   const runPanelHeight = Math.max(MIN_RUN_PANEL_HEIGHT, Math.min(720, runPanelState.height));
 
+  const activeRunTab = runPanelActiveTabId ? runPanelTabs.find((t) => t.id === runPanelActiveTabId) ?? null : null;
+  const activeTabRunning = (() => {
+    if (!activeRunTab) return false;
+    const runtime = scriptRuntimeById[activeRunTab.scriptId] ?? null;
+    const runtimeMatches = Boolean(runtime && runtime.tabId === activeRunTab.id && isScriptRuntimeValid(runtime));
+    if (!runtimeMatches) return false;
+    const quickJob = quickCommandJobByScriptId[activeRunTab.scriptId] ?? null;
+    if (quickJob) {
+      const state = toScriptExecutionStateFromQuickState(quickJob.state);
+      return state === "running" || state === "starting";
+    }
+    const localPhase = scriptLocalPhaseById[activeRunTab.scriptId] ?? null;
+    return localPhase === "starting" || localPhase === null;
+  })();
+
+  const rerunActiveTab = () => {
+    if (!activeRunTab) return;
+    const script = scripts.find((s) => s.id === activeRunTab.scriptId);
+    if (!script) return;
+    runQuickCommand(script);
+  };
+
+  const stopActiveTab = () => {
+    if (!activeRunTab) return;
+    stopScript(activeRunTab.scriptId);
+  };
+
   const filePanelState = workspace.ui?.fileExplorerPanel ?? {
     open: workspaceDefaultsRef.current.defaultFileExplorerPanelOpen,
     showHidden: workspaceDefaultsRef.current.defaultFileExplorerShowHidden,
@@ -1625,6 +1652,9 @@ function TerminalWorkspaceView({
             onCloseTab={handleCloseRunTab}
             onCollapse={() => setRunPanelOpen(false)}
             onResizeStart={handleBeginResizeRunPanel}
+            onRerunActiveTab={rerunActiveTab}
+            onStopActiveTab={stopActiveTab}
+            activeTabRunning={activeTabRunning}
             onPtyReady={handlePtyReady}
             onExit={handleSessionExit}
             onRegisterSnapshotProvider={registerSnapshotProvider}

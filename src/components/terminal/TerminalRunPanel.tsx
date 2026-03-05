@@ -8,7 +8,7 @@ import {
 } from "../../hooks/useQuickCommandRuntime";
 import type { QuickCommandJob } from "../../models/quickCommands";
 import type { RunPanelTab, TerminalSessionSnapshot } from "../../models/terminal";
-import { IconChevronsDownUp, IconX } from "../Icons";
+import { IconChevronsDownUp, IconPlay, IconRerun, IconSquareStop, IconX } from "../Icons";
 import TerminalPane from "./TerminalPane";
 
 type TerminalRunPanelProps = {
@@ -29,6 +29,9 @@ type TerminalRunPanelProps = {
   onCloseTab: (tabId: string) => void;
   onCollapse: () => void;
   onResizeStart: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onRerunActiveTab?: () => void;
+  onStopActiveTab?: () => void;
+  activeTabRunning?: boolean;
   onPtyReady: (sessionId: string, ptyId: string) => void;
   onExit: (sessionId: string, code?: number | null) => void;
   onRegisterSnapshotProvider: (sessionId: string, provider: () => string | null) => () => void;
@@ -112,6 +115,9 @@ export default function TerminalRunPanel({
   onCloseTab,
   onCollapse,
   onResizeStart,
+  onRerunActiveTab,
+  onStopActiveTab,
+  activeTabRunning = false,
   onPtyReady,
   onExit,
   onRegisterSnapshotProvider,
@@ -169,6 +175,31 @@ export default function TerminalRunPanel({
               </button>
             );
           })}
+        </div>
+        {/* Action buttons for active tab */}
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-transparent text-[rgba(34,197,94,0.95)] transition-colors duration-150 hover:border-[var(--terminal-divider)] hover:bg-[var(--terminal-hover-bg)] disabled:cursor-not-allowed disabled:opacity-50"
+            title={activeTabRunning ? "重新运行" : "运行"}
+            disabled={!onRerunActiveTab}
+            onClick={onRerunActiveTab}
+          >
+            {activeTabRunning ? <IconRerun size={14} /> : <IconPlay size={14} />}
+          </button>
+          <button
+            type="button"
+            className={`inline-flex h-7 w-7 items-center justify-center rounded-md border border-transparent transition-colors duration-150 hover:border-[var(--terminal-divider)] hover:bg-[var(--terminal-hover-bg)] disabled:cursor-not-allowed disabled:opacity-50 ${
+              activeTabRunning
+                ? "text-[rgba(239,68,68,0.95)]"
+                : "text-[var(--terminal-muted-fg)]"
+            }`}
+            title="停止"
+            disabled={!activeTabRunning || !onStopActiveTab}
+            onClick={onStopActiveTab}
+          >
+            <IconSquareStop size={14} />
+          </button>
         </div>
         <button
           type="button"

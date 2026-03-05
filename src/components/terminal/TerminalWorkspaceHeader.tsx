@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ScriptExecutionState } from "../../hooks/useQuickCommandRuntime";
 import type { TerminalRightSidebarTab, TerminalTab } from "../../models/terminal";
 import type { ProjectScript } from "../../models/types";
-import { IconFolder, IconGitBranch, IconMoreHorizontal } from "../Icons";
+import { IconChevronDown, IconFolder, IconGitBranch, IconPlay, IconRerun, IconSettings, IconSquareStop } from "../Icons";
 import TerminalTabs from "./TerminalTabs";
 
 type TerminalWorkspaceHeaderProps = {
@@ -41,7 +41,7 @@ export default function TerminalWorkspaceHeader({
   scripts,
   selectedScriptId,
   selectedScriptState,
-  quickCommandMessage,
+  quickCommandMessage: _quickCommandMessage,
   runDisabled,
   stopDisabled,
   scriptActionsDisabled,
@@ -49,7 +49,7 @@ export default function TerminalWorkspaceHeader({
   activeTabId,
   onSelectScript,
   onEditScript,
-  onDeleteScript,
+  onDeleteScript: _onDeleteScript,
   onRunScript,
   onStopScript,
   onToggleRightSidebar,
@@ -57,22 +57,22 @@ export default function TerminalWorkspaceHeader({
   onNewTab,
   onCloseTab,
 }: TerminalWorkspaceHeaderProps) {
-  const [scriptActionsOpen, setScriptActionsOpen] = useState(false);
-  const scriptActionsRef = useRef<HTMLDivElement | null>(null);
+  const [configDropdownOpen, setConfigDropdownOpen] = useState(false);
+  const configDropdownRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!scriptActionsOpen) {
+    if (!configDropdownOpen) {
       return;
     }
     const handleMouseDown = (event: MouseEvent) => {
-      if (scriptActionsRef.current?.contains(event.target as Node)) {
+      if (configDropdownRef.current?.contains(event.target as Node)) {
         return;
       }
-      setScriptActionsOpen(false);
+      setConfigDropdownOpen(false);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setScriptActionsOpen(false);
+        setConfigDropdownOpen(false);
       }
     };
     document.addEventListener("mousedown", handleMouseDown);
@@ -81,25 +81,19 @@ export default function TerminalWorkspaceHeader({
       document.removeEventListener("mousedown", handleMouseDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [scriptActionsOpen]);
+  }, [configDropdownOpen]);
 
   useEffect(() => {
     if (!scriptActionsDisabled) {
       return;
     }
-    setScriptActionsOpen(false);
+    setConfigDropdownOpen(false);
   }, [scriptActionsDisabled]);
 
-  const statusText =
-    selectedScriptState === "stoppingHard"
-      ? "强制停止中"
-      : selectedScriptState === "stoppingSoft"
-        ? "停止中"
-        : selectedScriptState === "starting"
-          ? "启动中"
-          : selectedScriptState === "running"
-            ? "运行中"
-            : null;
+  const scriptName = scripts.find((s) => s.id === selectedScriptId)?.name ?? "未选择";
+  const isRunning = selectedScriptState === "running";
+  const isStopping = selectedScriptState === "stoppingSoft" || selectedScriptState === "stoppingHard";
+  const isStarting = selectedScriptState === "starting";
 
   return (
     <header className="flex items-center gap-3 border-b border-[var(--terminal-divider)] bg-[var(--terminal-panel-bg)] px-3 py-2">
@@ -132,88 +126,97 @@ export default function TerminalWorkspaceHeader({
         <span className="text-[12px] font-semibold">{rightSidebarTab === "files" ? "文件" : "Git"}</span>
       </button>
       <div className="ml-auto flex shrink-0 items-center gap-2">
-        <div className="inline-flex h-7 min-w-[180px] items-center rounded-md border border-[var(--terminal-divider)] bg-[var(--terminal-bg)] px-2">
-          <select
-            className="w-full border-none bg-transparent text-[12px] font-semibold text-[var(--terminal-fg)] outline-none"
-            value={selectedScriptId ?? ""}
-            onChange={(event) => onSelectScript(event.target.value)}
-            disabled={scripts.length === 0}
-            title={scripts.length === 0 ? "暂无快捷命令" : "选择运行配置"}
-          >
-            {scripts.length === 0 ? <option value="">暂无快捷命令</option> : null}
-            {scripts.map((script) => (
-              <option key={script.id} value={script.id}>
-                {script.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="relative" ref={scriptActionsRef}>
+        {/* 配置选择器 */}
+        <div className="relative" ref={configDropdownRef}>
           <button
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[var(--terminal-divider)] bg-transparent text-[var(--terminal-muted-fg)] transition-colors duration-150 hover:bg-[var(--terminal-hover-bg)] hover:text-[var(--terminal-fg)] disabled:cursor-not-allowed disabled:opacity-50"
             type="button"
-            title={scriptActionsDisabled ? "暂无可操作配置" : "配置操作"}
-            onClick={() => setScriptActionsOpen((prev) => !prev)}
+            className="h-7 rounded-md border border-[var(--terminal-divider)] px-2 inline-flex items-center gap-1.5 text-[12px] font-semibold text-[var(--terminal-fg)] transition-colors duration-150 hover:bg-[var(--terminal-hover-bg)] disabled:cursor-not-allowed disabled:opacity-50"
+            title={scripts.length === 0 ? "暂无配置" : "选择运行配置"}
             disabled={scriptActionsDisabled}
+            onClick={() => setConfigDropdownOpen((prev) => !prev)}
           >
-            <IconMoreHorizontal size={14} />
+            {(isRunning || isStarting) ? (
+              <span className="h-2 w-2 shrink-0 rounded-full bg-[rgba(34,197,94,0.95)] animate-pulse" aria-hidden="true" />
+            ) : isStopping ? (
+              <span className="h-2 w-2 shrink-0 rounded-full bg-[rgba(234,179,8,0.95)] animate-pulse" aria-hidden="true" />
+            ) : null}
+            <span className="max-w-[140px] truncate">{scripts.length === 0 ? "暂无配置" : scriptName}</span>
+            <IconChevronDown size={12} className="shrink-0 text-[var(--terminal-muted-fg)]" />
           </button>
-          {scriptActionsOpen ? (
-            <div className="absolute right-0 top-full z-20 mt-1.5 min-w-[160px] rounded-md border border-[var(--terminal-divider)] bg-[var(--terminal-panel-bg)] p-1 shadow-[0_8px_24px_rgba(0,0,0,0.28)]">
+          {configDropdownOpen ? (
+            <div className="absolute right-0 top-full z-20 mt-1.5 min-w-[180px] rounded-md border border-[var(--terminal-divider)] bg-[var(--terminal-panel-bg)] p-1 shadow-[0_8px_24px_rgba(0,0,0,0.28)]">
+              {scripts.map((script) => (
+                <button
+                  key={script.id}
+                  type="button"
+                  className={`flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[12px] text-[var(--terminal-fg)] transition-colors hover:bg-[var(--terminal-hover-bg)] ${
+                    script.id === selectedScriptId ? "font-semibold" : ""
+                  }`}
+                  onClick={() => {
+                    onSelectScript(script.id);
+                    setConfigDropdownOpen(false);
+                  }}
+                >
+                  {script.id === selectedScriptId && (isRunning || isStarting) ? (
+                    <span className="h-2 w-2 shrink-0 rounded-full bg-[rgba(34,197,94,0.95)] animate-pulse" aria-hidden="true" />
+                  ) : script.id === selectedScriptId && isStopping ? (
+                    <span className="h-2 w-2 shrink-0 rounded-full bg-[rgba(234,179,8,0.95)] animate-pulse" aria-hidden="true" />
+                  ) : (
+                    <span className="h-2 w-2 shrink-0" aria-hidden="true" />
+                  )}
+                  {script.name}
+                </button>
+              ))}
+              {scripts.length > 0 ? <hr className="my-1 border-[var(--terminal-divider)]" /> : null}
               <button
                 type="button"
                 className="flex w-full items-center rounded-md px-2 py-1.5 text-left text-[12px] text-[var(--terminal-fg)] transition-colors hover:bg-[var(--terminal-hover-bg)]"
                 onClick={() => {
-                  setScriptActionsOpen(false);
+                  setConfigDropdownOpen(false);
                   onEditScript();
                 }}
               >
                 编辑配置...
               </button>
-              <button
-                type="button"
-                className="mt-1 flex w-full items-center rounded-md px-2 py-1.5 text-left text-[12px] text-[rgba(239,68,68,0.95)] transition-colors hover:bg-[rgba(239,68,68,0.15)]"
-                onClick={() => {
-                  setScriptActionsOpen(false);
-                  onDeleteScript();
-                }}
-              >
-                删除当前配置
-              </button>
             </div>
           ) : null}
         </div>
-        {quickCommandMessage ? (
-          <span
-            className="max-w-[180px] truncate text-[11px] font-semibold text-[var(--terminal-muted-fg)]"
-            title={quickCommandMessage}
+        {/* 图标按钮组 */}
+        <div className="flex items-center gap-1.5">
+          {/* 运行 / 重新运行按钮 */}
+          <button
+            type="button"
+            className="h-7 w-7 rounded-md border border-[var(--terminal-divider)] inline-flex items-center justify-center transition-colors duration-150 hover:bg-[var(--terminal-hover-bg)] disabled:cursor-not-allowed disabled:opacity-50 text-[rgba(34,197,94,0.95)]"
+            title={isRunning ? `重新运行 '${scriptName}'` : `运行 '${scriptName}'`}
+            disabled={runDisabled}
+            onClick={onRunScript}
           >
-            {quickCommandMessage}
-          </span>
-        ) : null}
-        {statusText ? (
-          <span className="inline-flex min-w-[56px] items-center justify-center text-[11px] font-semibold text-[var(--terminal-muted-fg)]">
-            {statusText}
-          </span>
-        ) : null}
-        <button
-          className="inline-flex h-7 items-center justify-center rounded-md border border-[var(--terminal-divider)] bg-[var(--terminal-accent-bg)] px-2.5 text-[12px] font-semibold text-[var(--terminal-fg)] transition-colors duration-150 hover:bg-[var(--terminal-hover-bg)] disabled:cursor-not-allowed disabled:opacity-50"
-          type="button"
-          title="运行当前配置"
-          disabled={runDisabled}
-          onClick={onRunScript}
-        >
-          运行
-        </button>
-        <button
-          className="inline-flex h-7 items-center justify-center rounded-md border border-[var(--terminal-divider)] bg-transparent px-2.5 text-[12px] font-semibold text-[var(--terminal-muted-fg)] transition-colors duration-150 hover:bg-[var(--terminal-hover-bg)] hover:text-[var(--terminal-fg)] disabled:cursor-not-allowed disabled:opacity-50"
-          type="button"
-          title="停止当前配置"
-          disabled={stopDisabled}
-          onClick={onStopScript}
-        >
-          停止
-        </button>
+            {isRunning ? <IconRerun size={14} /> : <IconPlay size={14} />}
+          </button>
+          {/* 停止按钮 */}
+          <button
+            type="button"
+            className={`h-7 w-7 rounded-md border inline-flex items-center justify-center transition-colors duration-150 hover:bg-[var(--terminal-hover-bg)] disabled:cursor-not-allowed disabled:opacity-50 ${
+              stopDisabled
+                ? "border-[var(--terminal-divider)] text-[var(--terminal-muted-fg)]"
+                : "border-[rgba(239,68,68,0.4)] text-[rgba(239,68,68,0.95)]"
+            }`}
+            title={`停止 '${scriptName}'`}
+            disabled={stopDisabled}
+            onClick={onStopScript}
+          >
+            <IconSquareStop size={14} />
+          </button>
+          {/* 设置按钮 */}
+          <button
+            type="button"
+            className="h-7 w-7 rounded-md border border-[var(--terminal-divider)] inline-flex items-center justify-center transition-colors duration-150 hover:bg-[var(--terminal-hover-bg)] text-[var(--terminal-muted-fg)] hover:text-[var(--terminal-fg)]"
+            title="运行配置"
+            onClick={onEditScript}
+          >
+            <IconSettings size={14} />
+          </button>
+        </div>
       </div>
     </header>
   );
