@@ -293,3 +293,17 @@
 - 版本号已在前端与 Tauri/Rust 侧统一升级到 `2.8.0`，确保构建产物与发布标签一致。
 - 发版前验证通过：`pnpm build`、`cargo check --manifest-path src-tauri/Cargo.toml --locked`。
 - 发布文档已新增 `docs/releases/v2.8.0.md`，可直接作为 GitHub Release 文案基础。
+
+---
+
+# 修复 Windows release 构建失败（tauri wrapper）任务清单
+
+- [x] 定位 release 失败链路（`pnpm tauri build` -> `scripts/tauri-cli-wrapper.mjs`）
+- [x] 将 wrapper 调用从 `pnpm exec tauri` 改为直接调用本地 `node_modules/.bin/tauri(.cmd)`，规避 Windows 子进程解析差异
+- [x] 增加 wrapper 错误输出，失败时打印底层 spawn 错误信息
+- [x] 本地验证：`pnpm tauri build --help`、`pnpm build`
+
+## Review
+- 根因是 wrapper 在子进程层再次依赖 `pnpm`，在 Windows runner 上存在命令解析不稳定，导致脚本直接以 `1` 退出且无有效错误上下文。
+- 现在改为调用项目内 Tauri CLI 可执行文件（Windows 使用 `tauri.cmd`），减少对全局 PATH 与 shell 解析行为的依赖。
+- 新增显式错误日志后，后续若仍失败可直接看到 `spawn` 级错误信息，定位成本更低。

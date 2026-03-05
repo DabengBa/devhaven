@@ -51,16 +51,28 @@ function syncTauriDevUrl(port) {
   console.log(`[tauri-wrapper] 已同步 devUrl -> ${expectedDevUrl}`);
 }
 
+function resolveLocalTauriBinary() {
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const binName = process.platform === "win32" ? "tauri.cmd" : "tauri";
+  return path.resolve(scriptDir, "../node_modules/.bin", binName);
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (args[0] === "dev") {
     syncTauriDevUrl(resolveVitePort());
   }
 
-  const result = spawnSync("pnpm", ["exec", "tauri", ...args], {
+  const tauriBinaryPath = resolveLocalTauriBinary();
+  const result = spawnSync(tauriBinaryPath, args, {
     stdio: "inherit",
     env: process.env,
   });
+
+  if (result.error) {
+    console.error(`[tauri-wrapper] 启动 Tauri CLI 失败: ${result.error.message}`);
+    process.exit(1);
+  }
 
   if (typeof result.status === "number") {
     process.exit(result.status);
