@@ -138,6 +138,10 @@ export type AppSettings = {
   gitIdentities: GitIdentity[];
   projectListViewMode: ProjectListViewMode;
   sharedScriptsRoot: string;
+  viteDevPort: number;
+  webEnabled: boolean;
+  webBindHost: string;
+  webBindPort: number;
 };
 
 export type AppStateFile = {

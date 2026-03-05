@@ -77,6 +77,14 @@ pub struct AppSettings {
     pub project_list_view_mode: ProjectListViewMode,
     #[serde(default = "default_shared_scripts_root")]
     pub shared_scripts_root: String,
+    #[serde(default = "default_vite_dev_port")]
+    pub vite_dev_port: u16,
+    #[serde(default = "default_web_enabled")]
+    pub web_enabled: bool,
+    #[serde(default = "default_web_bind_host")]
+    pub web_bind_host: String,
+    #[serde(default = "default_web_bind_port")]
+    pub web_bind_port: u16,
 }
 
 impl Default for AppSettings {
@@ -89,6 +97,10 @@ impl Default for AppSettings {
             git_identities: Vec::new(),
             project_list_view_mode: default_project_list_view_mode(),
             shared_scripts_root: default_shared_scripts_root(),
+            vite_dev_port: default_vite_dev_port(),
+            web_enabled: default_web_enabled(),
+            web_bind_host: default_web_bind_host(),
+            web_bind_port: default_web_bind_port(),
         }
     }
 }
@@ -115,6 +127,23 @@ fn default_terminal_theme() -> String {
 fn default_shared_scripts_root() -> String {
     "~/.devhaven/scripts".to_string()
 }
+
+fn default_vite_dev_port() -> u16 {
+    1420
+}
+
+fn default_web_enabled() -> bool {
+    true
+}
+
+fn default_web_bind_host() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_web_bind_port() -> u16 {
+    3210
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenToolSettings {

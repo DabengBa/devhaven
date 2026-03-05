@@ -15,6 +15,9 @@ import { pickColorForTag } from "../utils/tagColors";
 import { buildTemplateParams, mergeScriptParamSchema } from "../utils/scriptTemplate";
 
 const DEFAULT_SHARED_SCRIPTS_ROOT = "~/.devhaven/scripts";
+const DEFAULT_VITE_DEV_PORT = 1420;
+const DEFAULT_WEB_BIND_HOST = "0.0.0.0";
+const DEFAULT_WEB_BIND_PORT = 3210;
 
 const emptyState: AppStateFile = {
   version: 4,
@@ -36,6 +39,10 @@ const emptyState: AppStateFile = {
     gitIdentities: [],
     projectListViewMode: "card",
     sharedScriptsRoot: DEFAULT_SHARED_SCRIPTS_ROOT,
+    viteDevPort: DEFAULT_VITE_DEV_PORT,
+    webEnabled: true,
+    webBindHost: DEFAULT_WEB_BIND_HOST,
+    webBindPort: DEFAULT_WEB_BIND_PORT,
   },
 };
 
@@ -891,7 +898,37 @@ function normalizeSettings(settings: AppStateFile["settings"] | null | undefined
     gitIdentities: settings?.gitIdentities ?? emptyState.settings.gitIdentities,
     projectListViewMode: settings?.projectListViewMode ?? emptyState.settings.projectListViewMode,
     sharedScriptsRoot: sharedScriptsRoot || DEFAULT_SHARED_SCRIPTS_ROOT,
+    viteDevPort: normalizeViteDevPort(settings?.viteDevPort),
+    webEnabled: settings?.webEnabled ?? emptyState.settings.webEnabled,
+    webBindHost: settings?.webBindHost?.trim() || DEFAULT_WEB_BIND_HOST,
+    webBindPort: normalizeWebBindPort(settings?.webBindPort),
   };
+}
+
+function normalizeViteDevPort(port: number | string | null | undefined): number {
+  const candidate =
+    typeof port === "number"
+      ? port
+      : typeof port === "string"
+        ? Number.parseInt(port.trim(), 10)
+        : Number.NaN;
+  if (!Number.isInteger(candidate) || candidate < 1 || candidate > 65535) {
+    return DEFAULT_VITE_DEV_PORT;
+  }
+  return candidate;
+}
+
+function normalizeWebBindPort(port: number | string | null | undefined): number {
+  const candidate =
+    typeof port === "number"
+      ? port
+      : typeof port === "string"
+        ? Number.parseInt(port.trim(), 10)
+        : Number.NaN;
+  if (!Number.isInteger(candidate) || candidate < 1 || candidate > 65535) {
+    return DEFAULT_WEB_BIND_PORT;
+  }
+  return candidate;
 }
 
 function normalizeProjectScript(script: ProjectScript): ProjectScript {
