@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
+import { APP_RESUME_EVENT } from "../../utils/appResume";
 
 import {
   applyTerminalMonacoTheme,
@@ -35,6 +36,7 @@ export default function TerminalMonacoEditor({
 }: TerminalMonacoEditorProps) {
   const [ready, setReady] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -72,12 +74,33 @@ export default function TerminalMonacoEditor({
 
   const handleMount: OnMount = useCallback(
     (editorInstance) => {
+      editorRef.current = editorInstance;
       if (onSave) {
         registerSaveAction(editorInstance, onSave);
       }
     },
     [onSave],
   );
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const handleResume = () => {
+      try {
+        editorRef.current?.layout();
+      } catch (error) {
+        console.warn("Monaco 编辑器在恢复后重新布局失败", error);
+      }
+    };
+
+    window.addEventListener(APP_RESUME_EVENT, handleResume as EventListener);
+    return () => {
+      window.removeEventListener(APP_RESUME_EVENT, handleResume as EventListener);
+      editorRef.current = null;
+    };
+  }, []);
 
   const handleChange = useCallback(
     (next: string | undefined) => {

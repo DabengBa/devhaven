@@ -11,6 +11,7 @@ import {
   type WorktreeInitProgressPayload,
   type WorktreeInitStep,
 } from "../services/worktreeInit";
+import { APP_RESUME_EVENT } from "../utils/appResume";
 import { setInteractionLocked } from "../utils/interactionLock";
 
 const INTERACTION_LOCK_EVENT = "interaction-lock";
@@ -234,6 +235,33 @@ export default function InteractionLockOverlay() {
       cancelled = true;
     };
   }, [isLocked, isWorktreeCreateLock]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const resyncLockState = () => {
+      void (async () => {
+        try {
+          const snapshot = await getInteractionLockState();
+          setLockState(snapshot);
+          setInteractionLocked(Boolean(snapshot.locked));
+          if (!snapshot.locked) {
+            setClientLockPayload(null);
+            setWorktreeProgress(null);
+          }
+        } catch (error) {
+          console.warn("应用恢复后重新同步交互锁状态失败。", error);
+        }
+      })();
+    };
+
+    window.addEventListener(APP_RESUME_EVENT, resyncLockState as EventListener);
+    return () => {
+      window.removeEventListener(APP_RESUME_EVENT, resyncLockState as EventListener);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isLocked) {

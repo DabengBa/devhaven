@@ -17,6 +17,7 @@ import {
   writeTerminal,
 } from "../../services/terminal";
 import { openPathRuntime, openUrlRuntime } from "../../platform/runtime";
+import { APP_RESUME_EVENT } from "../../utils/appResume";
 
 type PtyRegistryEntry = {
   ptyId: string | null;
@@ -31,6 +32,7 @@ const PTY_KILL_GRACE_MS = 1000;
 const TERMINAL_SCROLLBACK_LINES = 5000;
 const CONNECT_OUTPUT_BUFFER_MAX_CHARS = 512 * 1024;
 const REPLAY_OVERLAP_SCAN_MAX_CHARS = 64 * 1024;
+const WAKE_RECOVERY_DELAYS_MS = [120, 360] as const;
 const SEARCH_OPTIONS = {
   caseSensitive: false,
   regex: false,
@@ -443,9 +445,12 @@ export default function TerminalPane({
   const webglAddonRef = useRef<WebglAddon | null>(null);
   const webglContextLossListenerRef = useRef<IDisposable | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
+  const wakeRecoveryFrameRef = useRef<number | null>(null);
+  const wakeRecoveryTimersRef = useRef<number[]>([]);
   const lastResizeSignatureRef = useRef<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const ptyIdRef = useRef<string | null>(null);
+  const syncPtySizeRef = useRef<() => void>(() => undefined);
   const restoredRef = useRef(false);
   const initialSavedStateRef = useRef<string | null>(savedState ?? null);
   const themeRef = useRef<ITheme>(theme);
@@ -473,6 +478,109 @@ export default function TerminalPane({
       webglAddonRef.current = null;
     }
   }, []);
+
+  const clearWakeRecoverySchedule = useCallback(() => {
+    if (wakeRecoveryFrameRef.current !== null) {
+      window.cancelAnimationFrame(wakeRecoveryFrameRef.current);
+      wakeRecoveryFrameRef.current = null;
+    }
+
+    for (const timer of wakeRecoveryTimersRef.current) {
+      window.clearTimeout(timer);
+    }
+    wakeRecoveryTimersRef.current = [];
+  }, []);
+
+  const ensureWebglRenderer = useCallback(
+    (options?: { forceRecreate?: boolean }) => {
+      const term = termRef.current;
+      if (!term) {
+        return;
+      }
+
+      if (!useWebgl || webglPermanentlyDisabled) {
+        if (webglAddonRef.current) {
+          disposeWebglAddon();
+        }
+        return;
+      }
+
+      if (options?.forceRecreate && webglAddonRef.current) {
+        disposeWebglAddon();
+      }
+
+      if (webglAddonRef.current) {
+        return;
+      }
+
+      try {
+        const addon = new WebglAddon();
+        const contextLossUnlisten = addon.onContextLoss(() => {
+          console.warn("检测到 WebGL 上下文丢失，已回退到默认终端渲染器。");
+          setWebglPermanentlyDisabled(true);
+          disposeWebglAddon();
+        });
+        term.loadAddon(addon);
+        webglContextLossListenerRef.current?.dispose();
+        webglContextLossListenerRef.current = contextLossUnlisten;
+        webglAddonRef.current = addon;
+      } catch (error) {
+        console.warn("WebGL 终端渲染初始化失败，将回退到默认渲染。", error);
+        setWebglPermanentlyDisabled(true);
+        disposeWebglAddon();
+      }
+    },
+    [disposeWebglAddon, useWebgl, webglPermanentlyDisabled],
+  );
+
+  const recoverTerminalAfterResume = useCallback(
+    (reason: string) => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
+
+      clearWakeRecoverySchedule();
+
+      const runRecoveryPass = (forceRecreateWebgl: boolean) => {
+        const term = termRef.current;
+        if (!term) {
+          return;
+        }
+
+        if (forceRecreateWebgl && isMacRef.current && useWebgl) {
+          ensureWebglRenderer({ forceRecreate: true });
+        } else {
+          ensureWebglRenderer();
+        }
+
+        syncPtySizeRef.current();
+
+        try {
+          term.refresh(0, Math.max(0, term.rows - 1));
+        } catch (error) {
+          console.warn(`终端在 ${reason} 后刷新失败。`, error);
+        }
+
+        if (isActive) {
+          term.focus();
+        }
+      };
+
+      wakeRecoveryFrameRef.current = window.requestAnimationFrame(() => {
+        wakeRecoveryFrameRef.current = null;
+        runRecoveryPass(true);
+      });
+
+      for (const delay of WAKE_RECOVERY_DELAYS_MS) {
+        const timer = window.setTimeout(() => {
+          wakeRecoveryTimersRef.current = wakeRecoveryTimersRef.current.filter((item) => item !== timer);
+          runRecoveryPass(false);
+        }, delay);
+        wakeRecoveryTimersRef.current.push(timer);
+      }
+    },
+    [clearWakeRecoverySchedule, ensureWebglRenderer, isActive, useWebgl],
+  );
 
   const closeSearch = useCallback(() => {
     searchAddonRef.current?.clearDecorations();
@@ -694,6 +802,7 @@ export default function TerminalPane({
       safeFit();
       schedulePtyResize();
     };
+    syncPtySizeRef.current = syncPtySize;
 
     term.open(container);
     const renderOnce = term.onRender(() => {
@@ -898,6 +1007,8 @@ export default function TerminalPane({
         window.cancelAnimationFrame(resizeFrameRef.current);
         resizeFrameRef.current = null;
       }
+      clearWakeRecoverySchedule();
+      syncPtySizeRef.current = () => undefined;
       lastResizeSignatureRef.current = null;
       unlistenOutput?.();
       unlistenExit?.();
@@ -920,6 +1031,7 @@ export default function TerminalPane({
     };
   }, [
     clientId,
+    clearWakeRecoverySchedule,
     closeSearch,
     cwd,
     disposeWebglAddon,
@@ -944,66 +1056,30 @@ export default function TerminalPane({
   }, [theme]);
 
   useEffect(() => {
-    const term = termRef.current;
-    if (!term) {
+    ensureWebglRenderer();
+  }, [ensureWebglRenderer]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
       return;
     }
 
-    if (!useWebgl) {
-      if (!webglAddonRef.current) {
-        return;
-      }
-      disposeWebglAddon();
-      return;
-    }
+    const handleResume = () => {
+      recoverTerminalAfterResume("应用恢复可见");
+    };
 
-    if (webglPermanentlyDisabled) {
-      if (webglAddonRef.current) {
-        disposeWebglAddon();
-      }
-      return;
-    }
-
-    if (webglAddonRef.current) {
-      return;
-    }
-    try {
-      const addon = new WebglAddon();
-      const contextLossUnlisten = addon.onContextLoss(() => {
-        console.warn("检测到 WebGL 上下文丢失，已回退到默认终端渲染器。");
-        setWebglPermanentlyDisabled(true);
-        disposeWebglAddon();
-      });
-      term.loadAddon(addon);
-      webglContextLossListenerRef.current?.dispose();
-      webglContextLossListenerRef.current = contextLossUnlisten;
-      webglAddonRef.current = addon;
-    } catch (error) {
-      console.warn("WebGL 终端渲染初始化失败，将回退到默认渲染。", error);
-      setWebglPermanentlyDisabled(true);
-      disposeWebglAddon();
-    }
-  }, [disposeWebglAddon, useWebgl, webglPermanentlyDisabled]);
+    window.addEventListener(APP_RESUME_EVENT, handleResume as EventListener);
+    return () => {
+      clearWakeRecoverySchedule();
+      window.removeEventListener(APP_RESUME_EVENT, handleResume as EventListener);
+    };
+  }, [clearWakeRecoverySchedule, recoverTerminalAfterResume]);
 
   useEffect(() => {
     if (!isActive) {
       return;
     }
-    const fitAddon = fitAddonRef.current;
-    if (fitAddon && termRef.current) {
-      const core = (termRef.current as Terminal & {
-        _core?: { _renderService?: { hasRenderer?: () => boolean } };
-      })._core;
-      const renderService = core?._renderService;
-      if (!renderService || (typeof renderService.hasRenderer === "function" && !renderService.hasRenderer())) {
-        return;
-      }
-      try {
-        fitAddon.fit();
-      } catch (error) {
-        console.warn("终端尺寸自适配失败，稍后将重试。", error);
-      }
-    }
+    syncPtySizeRef.current();
     try {
       termRef.current?.refresh(0, Math.max(0, (termRef.current?.rows ?? 1) - 1));
     } catch (error) {

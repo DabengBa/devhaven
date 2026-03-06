@@ -89,6 +89,7 @@ export function applyTerminalMonacoTheme(container: HTMLElement): void {
 
 export function getTerminalMonacoBaseOptions(readOnly: boolean) {
   return {
+    automaticLayout: true,
     minimap: { enabled: false },
     wordWrap: "on",
     scrollBeyondLastLine: false,

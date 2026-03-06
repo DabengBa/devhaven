@@ -372,3 +372,20 @@
 ## Review
 - 版本号已在前端与 Tauri/Rust 侧统一升级到 `2.8.1`，构建与锁文件状态一致。
 - 发版前验证通过：`npm run build`、`cargo check --manifest-path src-tauri/Cargo.toml --locked`。
+
+---
+
+# macOS 锁屏/睡眠后偶发黑屏修复任务清单
+
+- [x] 根因复盘：确认问题集中在 WKWebView 恢复缺少重绘链路、xterm WebGL 唤醒后未可靠恢复、黑色交互遮罩可能残留
+- [x] 设计最小修复：补统一 resume 事件与多阶段重绘/resize 触发
+- [x] 修复终端：唤醒后强制 fit + refresh + PTY resize，并在 macOS 上重建/降级 WebGL renderer
+- [x] 修复辅助层：唤醒后重新同步交互锁状态，避免黑色遮罩残留
+- [x] 修复编辑器：Monaco 编辑器/对比视图在唤醒后主动 layout
+- [x] 验证：`npm run build`、`cargo check --manifest-path src-tauri/Cargo.toml`
+
+## Review
+- 新增全局 `app-resume` 事件总线，在 `focus/pageshow/visibilitychange` 后分三拍触发恢复，覆盖 macOS 唤醒后首帧未完成布局的窗口。
+- `TerminalPane` 现在会在恢复后执行 WebGL 重建/降级、`fit`、`refresh`、PTY resize，避免终端 renderer 留在失效状态。
+- `InteractionLockOverlay` 会在恢复后重新向后端对账交互锁，降低黑色遮罩残留概率。
+- Monaco 编辑器与 Diff 视图增加恢复后 `layout()`，并开启 `automaticLayout`，补齐右侧编辑区的重绘闭环。

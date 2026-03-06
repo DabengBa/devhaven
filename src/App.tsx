@@ -23,6 +23,7 @@ import { useAppActions } from "./hooks/useAppActions";
 import { useAppViewState } from "./hooks/useAppViewState";
 import { HEATMAP_CONFIG } from "./models/heatmap";
 import type { ProjectListViewMode } from "./models/types";
+import { dispatchAppResumeEvent } from "./utils/appResume";
 import { MAIN_WINDOW_LABEL, shouldBlockReloadShortcut } from "./utils/worktreeHelpers";
 import { DevHavenProvider, useDevHavenContext } from "./state/DevHavenContext";
 import { useHeatmapData } from "./state/useHeatmapData";
@@ -140,6 +141,63 @@ function AppLayout() {
     return () => {
       window.removeEventListener("contextmenu", handleContextMenu, true);
       window.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof document === "undefined") {
+      return;
+    }
+
+    let resumeFrame: number | null = null;
+    const resumeTimers = new Set<number>();
+
+    const clearScheduledResume = () => {
+      if (resumeFrame !== null) {
+        window.cancelAnimationFrame(resumeFrame);
+        resumeFrame = null;
+      }
+      for (const timer of resumeTimers) {
+        window.clearTimeout(timer);
+      }
+      resumeTimers.clear();
+    };
+
+    const scheduleResumeRecovery = () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+
+      clearScheduledResume();
+      resumeFrame = window.requestAnimationFrame(() => {
+        resumeFrame = null;
+        dispatchAppResumeEvent();
+      });
+
+      for (const delay of [120, 360]) {
+        const timer = window.setTimeout(() => {
+          resumeTimers.delete(timer);
+          dispatchAppResumeEvent();
+        }, delay);
+        resumeTimers.add(timer);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        scheduleResumeRecovery();
+      }
+    };
+
+    window.addEventListener("focus", scheduleResumeRecovery);
+    window.addEventListener("pageshow", scheduleResumeRecovery);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      clearScheduledResume();
+      window.removeEventListener("focus", scheduleResumeRecovery);
+      window.removeEventListener("pageshow", scheduleResumeRecovery);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
 

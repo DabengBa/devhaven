@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
+import { APP_RESUME_EVENT } from "../../utils/appResume";
 
 import {
   applyTerminalMonacoTheme,
@@ -164,6 +165,25 @@ export default function TerminalMonacoDiffViewer({
       models.modified.setValue(nextModified);
     }
   }, [modified, original, ready]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const handleResume = () => {
+      try {
+        editorRef.current?.layout();
+      } catch (error) {
+        console.warn("Monaco Diff 在恢复后重新布局失败", error);
+      }
+    };
+
+    window.addEventListener(APP_RESUME_EVENT, handleResume as EventListener);
+    return () => {
+      window.removeEventListener(APP_RESUME_EVENT, handleResume as EventListener);
+    };
+  }, []);
 
   if (!ready) {
     return (
