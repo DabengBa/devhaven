@@ -23,7 +23,7 @@ import { useAppActions } from "./hooks/useAppActions";
 import { useAppViewState } from "./hooks/useAppViewState";
 import { HEATMAP_CONFIG } from "./models/heatmap";
 import type { ProjectListViewMode } from "./models/types";
-import { dispatchAppResumeEvent } from "./utils/appResume";
+import { APP_RESUME_MIN_INACTIVE_MS, dispatchAppResumeEvent } from "./utils/appResume";
 import { MAIN_WINDOW_LABEL, shouldBlockReloadShortcut } from "./utils/worktreeHelpers";
 import { DevHavenProvider, useDevHavenContext } from "./state/DevHavenContext";
 import { useHeatmapData } from "./state/useHeatmapData";
@@ -150,17 +150,14 @@ function AppLayout() {
     }
 
     let resumeFrame: number | null = null;
-    const resumeTimers = new Set<number>();
+    let hiddenAt: number | null = null;
+    let resumeDispatchedForHiddenAt: number | null = null;
 
     const clearScheduledResume = () => {
       if (resumeFrame !== null) {
         window.cancelAnimationFrame(resumeFrame);
         resumeFrame = null;
       }
-      for (const timer of resumeTimers) {
-        window.clearTimeout(timer);
-      }
-      resumeTimers.clear();
     };
 
     const scheduleResumeRecovery = () => {
@@ -173,30 +170,47 @@ function AppLayout() {
         resumeFrame = null;
         dispatchAppResumeEvent();
       });
+    };
 
-      for (const delay of [120, 360]) {
-        const timer = window.setTimeout(() => {
-          resumeTimers.delete(timer);
-          dispatchAppResumeEvent();
-        }, delay);
-        resumeTimers.add(timer);
+    const maybeRecoverFromHidden = () => {
+      if (hiddenAt === null || resumeDispatchedForHiddenAt === hiddenAt) {
+        return;
       }
+
+      const inactiveMs = Date.now() - hiddenAt;
+      if (inactiveMs < APP_RESUME_MIN_INACTIVE_MS) {
+        return;
+      }
+
+      resumeDispatchedForHiddenAt = hiddenAt;
+      scheduleResumeRecovery();
     };
 
     const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        resumeDispatchedForHiddenAt = null;
+        clearScheduledResume();
+        return;
+      }
+
       if (document.visibilityState === "visible") {
+        maybeRecoverFromHidden();
+      }
+    };
+
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
         scheduleResumeRecovery();
       }
     };
 
-    window.addEventListener("focus", scheduleResumeRecovery);
-    window.addEventListener("pageshow", scheduleResumeRecovery);
+    window.addEventListener("pageshow", handlePageShow);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       clearScheduledResume();
-      window.removeEventListener("focus", scheduleResumeRecovery);
-      window.removeEventListener("pageshow", scheduleResumeRecovery);
+      window.removeEventListener("pageshow", handlePageShow);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
