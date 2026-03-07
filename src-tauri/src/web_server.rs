@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::env;
 use std::net::TcpListener as StdTcpListener;
 use std::path::{Component, Path, PathBuf};
@@ -6,6 +5,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path as AxumPath, Query, State, WebSocketUpgrade, ws::Message, ws::WebSocket};
 use axum::http::StatusCode;
 use axum::http::header::{self, HeaderValue};
@@ -14,22 +14,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tokio::sync::oneshot;
 use tower_http::cors::CorsLayer;
 
-use crate::interaction_lock::InteractionLockState;
-use crate::models::{
-    GitIdentity, GlobalSkillInstallRequest, GlobalSkillUninstallRequest,
-    SharedScriptManifestScript, WorktreeInitRetryRequest, WorktreeInitStartRequest,
-    WorktreeInitStatusQuery,
-};
-use crate::quick_command_manager::QuickCommandManager;
-use crate::terminal::TerminalState;
+use crate::command_catalog::{WebApiError, dispatch_web_command};
 use crate::web_event_bus;
-use crate::worktree_init::WorktreeInitState;
 
 const DEFAULT_WEB_HOST: &str = "0.0.0.0";
 const DEFAULT_WEB_PORT: u16 = 3210;
@@ -38,20 +29,6 @@ const DEFAULT_WEB_ENABLED: bool = true;
 #[derive(Clone)]
 struct WebServerState {
     app: AppHandle,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ApiSuccess<T> {
-    ok: bool,
-    data: T,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ApiError {
-    ok: bool,
-    error: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,12 +53,6 @@ impl WebSocketQuery {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
     }
-}
-
-#[derive(Debug, Clone)]
-struct PathGuard {
-    home_dir: PathBuf,
-    allowed_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -333,13 +304,7 @@ fn normalize_web_asset_path(raw_path: &str) -> String {
 fn serve_web_asset(app: &AppHandle, path: &str) -> Response {
     let response = serve_web_asset_if_exists(app, path);
     if response.status() == StatusCode::NOT_FOUND {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                ok: false,
-                error: format!("前端资源缺失: {}", path),
-            }),
-        )
+        return WebApiError::internal("asset_missing", format!("前端资源缺失: {}", path))
             .into_response();
     }
     response
@@ -380,23 +345,30 @@ fn serve_web_asset_if_exists(app: &AppHandle, path: &str) -> Response {
 async fn handle_command(
     State(state): State<WebServerState>,
     AxumPath(command): AxumPath<String>,
-    Json(payload): Json<Value>,
-) -> impl IntoResponse {
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let payload = match payload {
+        Ok(Json(payload)) => payload,
+        Err(error) => {
+            return WebApiError::bad_request(
+                "invalid_json",
+                format!("请求体不是合法 JSON: {}", error.body_text()),
+            )
+            .into_response();
+        }
+    };
     let app = state.app.clone();
     let dispatch_result =
-        tokio::task::spawn_blocking(move || dispatch_command(&app, &command, payload)).await;
+        tokio::task::spawn_blocking(move || dispatch_web_command(&app, &command, payload)).await;
 
     match dispatch_result {
-        Ok(Ok(data)) => (StatusCode::OK, Json(ApiSuccess { ok: true, data })).into_response(),
-        Ok(Err(error)) => (StatusCode::OK, Json(ApiError { ok: false, error })).into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                ok: false,
-                error: format!("后台命令执行失败: {}", error),
-            }),
+        Ok(Ok(data)) => (StatusCode::OK, Json(data)).into_response(),
+        Ok(Err(error)) => error.into_response(),
+        Err(error) => WebApiError::internal(
+            "command_dispatch_failed",
+            format!("后台命令执行失败: {}", error),
         )
-            .into_response(),
+        .into_response(),
     }
 }
 
@@ -406,14 +378,11 @@ async fn handle_websocket_upgrade(
     State(_state): State<WebServerState>,
 ) -> impl IntoResponse {
     let Some(window_label) = query.resolved_window_label() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                ok: false,
-                error: "缺少 windowLabel 查询参数".to_string(),
-            }),
+        return WebApiError::bad_request(
+            "missing_window_label",
+            "缺少 windowLabel 查询参数",
         )
-            .into_response();
+        .into_response();
     };
     ws.on_upgrade(move |socket| handle_websocket(socket, Some(window_label)))
         .into_response()
@@ -453,491 +422,6 @@ async fn handle_websocket(mut socket: WebSocket, window_label: Option<String>) {
     }
 }
 
-fn dispatch_command(app: &AppHandle, command: &str, payload: Value) -> Result<Value, String> {
-    let guard = PathGuard::from_app(app)?;
-
-    match command {
-        "load_app_state" => to_json(crate::load_app_state(app.clone())),
-        "save_app_state" => {
-            let state = required::<crate::models::AppStateFile>(&payload, &["state"])?;
-            for directory in &state.directories {
-                guard.ensure_under_home_path(directory, "state.directories[]")?;
-            }
-            for project_path in &state.direct_project_paths {
-                guard.ensure_under_home_path(project_path, "state.directProjectPaths[]")?;
-            }
-            to_json(crate::save_app_state(app.clone(), state))
-        }
-        "load_projects" => to_json(crate::load_projects(app.clone())),
-        "save_projects" => {
-            let projects = required::<Vec<crate::models::Project>>(&payload, &["projects"])?;
-            to_json(crate::save_projects(app.clone(), projects))
-        }
-        "discover_projects" => {
-            let directories = required::<Vec<String>>(&payload, &["directories"])?;
-            for directory in &directories {
-                guard.ensure_under_home_path(directory, "directories[]")?;
-            }
-            to_json(Ok::<_, String>(crate::discover_projects(directories)))
-        }
-        "build_projects" => {
-            let paths = required::<Vec<String>>(&payload, &["paths"])?;
-            for path in &paths {
-                guard.ensure_under_home_path(path, "paths[]")?;
-            }
-            let existing = required::<Vec<crate::models::Project>>(&payload, &["existing"])?;
-            to_json(Ok::<_, String>(crate::build_projects(paths, existing)))
-        }
-        "list_global_skills" => to_json(crate::list_global_skills()),
-        "install_global_skill" => {
-            let request = required::<GlobalSkillInstallRequest>(&payload, &["request"])?;
-            to_json(crate::install_global_skill(request))
-        }
-        "uninstall_global_skill" => {
-            let request = required::<GlobalSkillUninstallRequest>(&payload, &["request"])?;
-            to_json(crate::uninstall_global_skill(request))
-        }
-        "list_branches" => {
-            let base_path = required::<String>(&payload, &["basePath", "base_path"])?;
-            guard.ensure_allowed_path(&base_path, "basePath")?;
-            to_json(Ok::<_, String>(crate::list_branches(base_path)))
-        }
-        "git_is_repo" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            to_json(Ok::<_, String>(crate::git_is_repo(path)))
-        }
-        "git_get_status" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            to_json(crate::git_get_status(path))
-        }
-        "git_get_diff_contents" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let relative_path = required::<String>(&payload, &["relativePath", "relative_path"])?;
-            let staged = required::<bool>(&payload, &["staged"])?;
-            let old_relative_path =
-                optional::<String>(&payload, &["oldRelativePath", "old_relative_path"])?;
-            to_json(crate::git_get_diff_contents(
-                path,
-                relative_path,
-                staged,
-                old_relative_path,
-            ))
-        }
-        "git_stage_files" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let relative_paths =
-                required::<Vec<String>>(&payload, &["relativePaths", "relative_paths"])?;
-            to_json(crate::git_stage_files(path, relative_paths))
-        }
-        "git_unstage_files" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let relative_paths =
-                required::<Vec<String>>(&payload, &["relativePaths", "relative_paths"])?;
-            to_json(crate::git_unstage_files(path, relative_paths))
-        }
-        "git_discard_files" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let relative_paths =
-                required::<Vec<String>>(&payload, &["relativePaths", "relative_paths"])?;
-            to_json(crate::git_discard_files(path, relative_paths))
-        }
-        "git_commit" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let message = required::<String>(&payload, &["message"])?;
-            to_json(crate::git_commit(path, message))
-        }
-        "git_checkout_branch" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let branch = required::<String>(&payload, &["branch"])?;
-            to_json(crate::git_checkout_branch(path, branch))
-        }
-        "git_delete_branch" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let branch = required::<String>(&payload, &["branch"])?;
-            let force = required::<bool>(&payload, &["force"])?;
-            to_json(crate::git_delete_branch(path, branch, force))
-        }
-        "git_worktree_add" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let branch = required::<String>(&payload, &["branch"])?;
-            let create_branch = required::<bool>(&payload, &["createBranch", "create_branch"])?;
-            let target_path = optional::<String>(&payload, &["targetPath", "target_path"])?;
-            if let Some(target_path) = target_path.as_deref() {
-                guard.ensure_allowed_path(target_path, "targetPath")?;
-            }
-            to_json(crate::git_worktree_add(
-                path,
-                branch,
-                create_branch,
-                target_path,
-            ))
-        }
-        "git_worktree_list" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            to_json(crate::git_worktree_list(path))
-        }
-        "git_worktree_remove" => {
-            let path = required::<String>(&payload, &["path"])?;
-            let worktree_path = required::<String>(&payload, &["worktreePath", "worktree_path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            guard.ensure_allowed_path(&worktree_path, "worktreePath")?;
-            let force = required::<bool>(&payload, &["force"])?;
-            to_json(crate::git_worktree_remove(path, worktree_path, force))
-        }
-        "get_interaction_lock_state" => {
-            let lock_state = app.state::<InteractionLockState>();
-            to_json(Ok::<_, String>(crate::get_interaction_lock_state(
-                lock_state,
-            )))
-        }
-        "apply_web_server_config" => {
-            let runtime = app.state::<WebServerRuntime>();
-            to_json(apply_config(app.clone(), runtime.inner().clone()))
-        }
-        "worktree_init_start" => {
-            let state = app.state::<WorktreeInitState>();
-            let request = required::<WorktreeInitStartRequest>(&payload, &["request"])?;
-            guard.ensure_allowed_path(&request.project_path, "request.projectPath")?;
-            to_json(crate::worktree_init_start(app.clone(), state, request))
-        }
-        "worktree_init_create" => {
-            let state = app.state::<WorktreeInitState>();
-            let interaction_lock = app.state::<InteractionLockState>();
-            let request = required::<WorktreeInitStartRequest>(&payload, &["request"])?;
-            guard.ensure_allowed_path(&request.project_path, "request.projectPath")?;
-            to_json(crate::worktree_init_create(
-                app.clone(),
-                state,
-                interaction_lock,
-                request,
-            ))
-        }
-        "worktree_init_create_blocking" => {
-            let state = app.state::<WorktreeInitState>();
-            let interaction_lock = app.state::<InteractionLockState>();
-            let request = required::<WorktreeInitStartRequest>(&payload, &["request"])?;
-            guard.ensure_allowed_path(&request.project_path, "request.projectPath")?;
-            to_json(crate::worktree_init_create_blocking(
-                app.clone(),
-                state,
-                interaction_lock,
-                request,
-            ))
-        }
-        "worktree_init_cancel" => {
-            let state = app.state::<WorktreeInitState>();
-            let job_id = required::<String>(&payload, &["jobId", "job_id"])?;
-            to_json(crate::worktree_init_cancel(app.clone(), state, job_id))
-        }
-        "worktree_init_retry" => {
-            let state = app.state::<WorktreeInitState>();
-            let request = required::<WorktreeInitRetryRequest>(&payload, &["request"])?;
-            to_json(crate::worktree_init_retry(app.clone(), state, request))
-        }
-        "worktree_init_status" => {
-            let state = app.state::<WorktreeInitState>();
-            let query = optional::<WorktreeInitStatusQuery>(&payload, &["query"])?;
-            if let Some(project_path) = query.as_ref().and_then(|item| item.project_path.as_ref()) {
-                guard.ensure_allowed_path(project_path, "query.projectPath")?;
-            }
-            to_json(crate::worktree_init_status(state, query))
-        }
-        "open_in_finder" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            to_json(crate::open_in_finder(path))
-        }
-        "resolve_home_dir" => to_json(crate::resolve_home_dir(app.clone())),
-        "copy_to_clipboard" => {
-            let content = required::<String>(&payload, &["content"])?;
-            to_json(crate::copy_to_clipboard(app.clone(), content))
-        }
-        "list_shared_scripts" => {
-            let root = optional::<String>(&payload, &["root"])?;
-            if let Some(root) = root.as_deref() {
-                guard.ensure_allowed_path(root, "root")?;
-            }
-            to_json(crate::list_shared_scripts(app.clone(), root))
-        }
-        "save_shared_scripts_manifest" => {
-            let root = optional::<String>(&payload, &["root"])?;
-            if let Some(root) = root.as_deref() {
-                guard.ensure_allowed_path(root, "root")?;
-            }
-            let scripts = required::<Vec<SharedScriptManifestScript>>(&payload, &["scripts"])?;
-            to_json(crate::save_shared_scripts_manifest(
-                app.clone(),
-                root,
-                scripts,
-            ))
-        }
-        "restore_shared_script_presets" => {
-            let root = optional::<String>(&payload, &["root"])?;
-            if let Some(root) = root.as_deref() {
-                guard.ensure_allowed_path(root, "root")?;
-            }
-            to_json(crate::restore_shared_script_presets(app.clone(), root))
-        }
-        "read_shared_script_file" => {
-            let root = optional::<String>(&payload, &["root"])?;
-            if let Some(root) = root.as_deref() {
-                guard.ensure_allowed_path(root, "root")?;
-            }
-            let relative_path = required::<String>(&payload, &["relativePath", "relative_path"])?;
-            to_json(crate::read_shared_script_file(
-                app.clone(),
-                root,
-                relative_path,
-            ))
-        }
-        "write_shared_script_file" => {
-            let root = optional::<String>(&payload, &["root"])?;
-            if let Some(root) = root.as_deref() {
-                guard.ensure_allowed_path(root, "root")?;
-            }
-            let relative_path = required::<String>(&payload, &["relativePath", "relative_path"])?;
-            let content = required::<String>(&payload, &["content"])?;
-            to_json(crate::write_shared_script_file(
-                app.clone(),
-                root,
-                relative_path,
-                content,
-            ))
-        }
-        "read_project_notes" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            to_json(crate::read_project_notes(path))
-        }
-        "read_project_notes_previews" => {
-            let paths = required::<Vec<String>>(&payload, &["paths"])?;
-            for path in &paths {
-                guard.ensure_allowed_path(path, "paths[]")?;
-            }
-            to_json(Ok::<_, String>(crate::read_project_notes_previews(paths)))
-        }
-        "write_project_notes" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let notes = optional::<String>(&payload, &["notes"])?;
-            to_json(crate::write_project_notes(path, notes))
-        }
-        "read_project_todo" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            to_json(crate::read_project_todo(path))
-        }
-        "write_project_todo" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let todo = optional::<String>(&payload, &["todo"])?;
-            to_json(crate::write_project_todo(path, todo))
-        }
-        "list_project_markdown_files" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            to_json(crate::list_project_markdown_files(path))
-        }
-        "read_project_markdown_file" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let relative_path = required::<String>(&payload, &["relativePath", "relative_path"])?;
-            to_json(crate::read_project_markdown_file(path, relative_path))
-        }
-        "list_project_dir_entries" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let relative_path = required::<String>(&payload, &["relativePath", "relative_path"])?;
-            let show_hidden = required::<bool>(&payload, &["showHidden", "show_hidden"])?;
-            to_json(Ok::<_, String>(crate::list_project_dir_entries(
-                path,
-                relative_path,
-                show_hidden,
-            )))
-        }
-        "read_project_file" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let relative_path = required::<String>(&payload, &["relativePath", "relative_path"])?;
-            to_json(Ok::<_, String>(crate::read_project_file(
-                path,
-                relative_path,
-            )))
-        }
-        "write_project_file" => {
-            let path = required::<String>(&payload, &["path"])?;
-            guard.ensure_allowed_path(&path, "path")?;
-            let relative_path = required::<String>(&payload, &["relativePath", "relative_path"])?;
-            let content = required::<String>(&payload, &["content"])?;
-            to_json(Ok::<_, String>(crate::write_project_file(
-                path,
-                relative_path,
-                content,
-            )))
-        }
-        "collect_git_daily" => {
-            let paths = required::<Vec<String>>(&payload, &["paths"])?;
-            for path in &paths {
-                guard.ensure_allowed_path(path, "paths[]")?;
-            }
-            let identities =
-                optional::<Vec<GitIdentity>>(&payload, &["identities"])?.unwrap_or_default();
-            to_json(Ok::<_, String>(crate::collect_git_daily(paths, identities)))
-        }
-        "load_heatmap_cache" => to_json(crate::load_heatmap_cache(app.clone())),
-        "save_heatmap_cache" => {
-            let cache = required::<crate::models::HeatmapCacheFile>(&payload, &["cache"])?;
-            to_json(crate::save_heatmap_cache(app.clone(), cache))
-        }
-        "load_terminal_workspace" => {
-            let project_path = required::<String>(&payload, &["projectPath", "project_path"])?;
-            guard.ensure_allowed_path(&project_path, "projectPath")?;
-            to_json(crate::load_terminal_workspace(app.clone(), project_path))
-        }
-        "save_terminal_workspace" => {
-            let project_path = required::<String>(&payload, &["projectPath", "project_path"])?;
-            guard.ensure_allowed_path(&project_path, "projectPath")?;
-            let workspace = required::<crate::models::TerminalWorkspace>(&payload, &["workspace"])?;
-            let source_client_id =
-                optional::<String>(&payload, &["sourceClientId", "source_client_id"])?;
-            to_json(crate::save_terminal_workspace(
-                app.clone(),
-                project_path,
-                workspace,
-                source_client_id,
-            ))
-        }
-        "delete_terminal_workspace" => {
-            let project_path = required::<String>(&payload, &["projectPath", "project_path"])?;
-            guard.ensure_allowed_path(&project_path, "projectPath")?;
-            let source_client_id =
-                optional::<String>(&payload, &["sourceClientId", "source_client_id"])?;
-            to_json(crate::delete_terminal_workspace(
-                app.clone(),
-                project_path,
-                source_client_id,
-            ))
-        }
-        "list_terminal_workspace_summaries" => {
-            to_json(crate::list_terminal_workspace_summaries(app.clone()))
-        }
-        "get_codex_monitor_snapshot" => to_json(crate::get_codex_monitor_snapshot(app.clone())),
-        "quick_command_start" => {
-            let state = app.state::<QuickCommandManager>();
-            let project_id = required::<String>(&payload, &["projectId", "project_id"])?;
-            let project_path = required::<String>(&payload, &["projectPath", "project_path"])?;
-            guard.ensure_allowed_path(&project_path, "projectPath")?;
-            let script_id = required::<String>(&payload, &["scriptId", "script_id"])?;
-            let command = required::<String>(&payload, &["command"])?;
-            let window_label = optional::<String>(&payload, &["windowLabel", "window_label"])?;
-            to_json(Ok::<_, String>(
-                crate::quick_command_manager::quick_command_start(
-                    app.clone(),
-                    state,
-                    project_id,
-                    project_path,
-                    script_id,
-                    command,
-                    window_label,
-                ),
-            ))
-        }
-        "quick_command_stop" => {
-            let state = app.state::<QuickCommandManager>();
-            let job_id = required::<String>(&payload, &["jobId", "job_id"])?;
-            let force = optional::<bool>(&payload, &["force"])?;
-            to_json(crate::quick_command_manager::quick_command_stop(
-                app.clone(),
-                state,
-                job_id,
-                force,
-            ))
-        }
-        "quick_command_finish" => {
-            let state = app.state::<QuickCommandManager>();
-            let job_id = required::<String>(&payload, &["jobId", "job_id"])?;
-            let exit_code = optional::<i32>(&payload, &["exitCode", "exit_code"])?;
-            let error = optional::<String>(&payload, &["error"])?;
-            to_json(crate::quick_command_manager::quick_command_finish(
-                app.clone(),
-                state,
-                job_id,
-                exit_code,
-                error,
-            ))
-        }
-        "quick_command_list" => {
-            let state = app.state::<QuickCommandManager>();
-            let project_path = optional::<String>(&payload, &["projectPath", "project_path"])?;
-            if let Some(project_path) = project_path.as_deref() {
-                guard.ensure_allowed_path(project_path, "projectPath")?;
-            }
-            to_json(Ok::<_, String>(
-                crate::quick_command_manager::quick_command_list(state, project_path),
-            ))
-        }
-        "quick_command_snapshot" => {
-            let state = app.state::<QuickCommandManager>();
-            to_json(Ok::<_, String>(
-                crate::quick_command_manager::quick_command_snapshot(state),
-            ))
-        }
-        "terminal_create_session" => {
-            let state = app.state::<TerminalState>();
-            let project_path = required::<String>(&payload, &["projectPath", "project_path"])?;
-            guard.ensure_allowed_path(&project_path, "projectPath")?;
-            let cols = required::<u16>(&payload, &["cols"])?;
-            let rows = required::<u16>(&payload, &["rows"])?;
-            let window_label = required::<String>(&payload, &["windowLabel", "window_label"])?;
-            let session_id = optional::<String>(&payload, &["sessionId", "session_id"])?;
-            let client_id = optional::<String>(&payload, &["clientId", "client_id"])?;
-            to_json(crate::terminal::terminal_create_session(
-                app.clone(),
-                state,
-                project_path,
-                cols,
-                rows,
-                window_label,
-                session_id,
-                client_id,
-            ))
-        }
-        "terminal_write" => {
-            let state = app.state::<TerminalState>();
-            let pty_id = required::<String>(&payload, &["ptyId", "pty_id"])?;
-            let data = required::<String>(&payload, &["data"])?;
-            to_json(crate::terminal::terminal_write(state, pty_id, data))
-        }
-        "terminal_resize" => {
-            let state = app.state::<TerminalState>();
-            let pty_id = required::<String>(&payload, &["ptyId", "pty_id"])?;
-            let cols = required::<u16>(&payload, &["cols"])?;
-            let rows = required::<u16>(&payload, &["rows"])?;
-            to_json(crate::terminal::terminal_resize(state, pty_id, cols, rows))
-        }
-        "terminal_kill" => {
-            let state = app.state::<TerminalState>();
-            let pty_id = required::<String>(&payload, &["ptyId", "pty_id"])?;
-            let client_id = optional::<String>(&payload, &["clientId", "client_id"])?;
-            let force = optional::<bool>(&payload, &["force"])?;
-            to_json(crate::terminal::terminal_kill(
-                state, pty_id, client_id, force,
-            ))
-        }
-        _ => Err(format!("未知命令: {}", command)),
-    }
-}
 
 fn should_send_event_to_ws_client(
     event: &web_event_bus::WebEventEnvelope,
@@ -951,155 +435,4 @@ fn should_send_event_to_ws_client(
     }
 
     expected_window_label.is_some()
-}
-
-impl PathGuard {
-    fn from_app(app: &AppHandle) -> Result<Self, String> {
-        let home_dir = app
-            .path()
-            .home_dir()
-            .map_err(|error| format!("解析用户目录失败: {error}"))?;
-        let app_state = crate::load_app_state(app.clone()).unwrap_or_else(|error| {
-            log::warn!("加载 app_state 失败，路径校验将使用默认空配置: {}", error);
-            crate::models::AppStateFile::default()
-        });
-        let mut roots = BTreeSet::new();
-        for directory in app_state.directories {
-            if let Some(path) = normalize_absolute_path(&directory, &home_dir) {
-                roots.insert(canonical_or_normalized(path));
-            }
-        }
-        for project_path in app_state.direct_project_paths {
-            if let Some(path) = normalize_absolute_path(&project_path, &home_dir) {
-                roots.insert(canonical_or_normalized(path));
-            }
-        }
-
-        // 允许应用自身数据目录（shared scripts/cache/worktrees 等）作为内部可访问根。
-        roots.insert(canonical_or_normalized(home_dir.join(".devhaven")));
-
-        Ok(Self {
-            home_dir,
-            allowed_roots: roots.into_iter().collect(),
-        })
-    }
-
-    fn ensure_allowed_path(&self, raw: &str, field: &str) -> Result<(), String> {
-        let candidate = normalize_absolute_path(raw, &self.home_dir)
-            .ok_or_else(|| format!("参数 {field} 非法：路径必须是绝对路径"))?;
-        let candidate = canonical_or_normalized(candidate);
-        let is_allowed = self
-            .allowed_roots
-            .iter()
-            .any(|root| candidate.starts_with(root));
-        if is_allowed {
-            return Ok(());
-        }
-
-        Err(format!(
-            "参数 {field} 越权：路径不在受管目录范围内 ({})",
-            candidate.display()
-        ))
-    }
-
-    fn ensure_under_home_path(&self, raw: &str, field: &str) -> Result<(), String> {
-        let candidate = normalize_absolute_path(raw, &self.home_dir)
-            .ok_or_else(|| format!("参数 {field} 非法：路径必须是绝对路径"))?;
-        let candidate = canonical_or_normalized(candidate);
-        if candidate == self.home_dir {
-            return Err(format!(
-                "参数 {field} 非法：不允许直接使用用户目录根路径 ({})",
-                candidate.display()
-            ));
-        }
-        if candidate.starts_with(&self.home_dir) {
-            return Ok(());
-        }
-        Err(format!(
-            "参数 {field} 非法：仅允许访问当前用户目录下的路径 ({})",
-            candidate.display()
-        ))
-    }
-}
-
-fn normalize_absolute_path(raw: &str, home_dir: &Path) -> Option<PathBuf> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let expanded = if trimmed == "~" {
-        home_dir.to_path_buf()
-    } else if let Some(rest) = trimmed.strip_prefix("~/") {
-        home_dir.join(rest)
-    } else {
-        PathBuf::from(trimmed)
-    };
-
-    if !expanded.is_absolute() {
-        return None;
-    }
-
-    Some(normalize_path_components(expanded))
-}
-
-fn normalize_path_components(path: PathBuf) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
-}
-
-fn canonical_or_normalized(path: PathBuf) -> PathBuf {
-    std::fs::canonicalize(&path).unwrap_or(path)
-}
-
-fn to_json<T: Serialize>(result: Result<T, String>) -> Result<Value, String> {
-    match result {
-        Ok(value) => {
-            serde_json::to_value(value).map_err(|error| format!("序列化返回值失败: {}", error))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn required<T: DeserializeOwned>(payload: &Value, keys: &[&str]) -> Result<T, String> {
-    let value = find_payload_value(payload, keys).ok_or_else(|| {
-        if keys.is_empty() {
-            "缺少参数".to_string()
-        } else {
-            format!("缺少参数: {}", keys[0])
-        }
-    })?;
-    serde_json::from_value(value.clone())
-        .map_err(|error| format!("参数解析失败 {}: {}", keys[0], error))
-}
-
-fn optional<T: DeserializeOwned>(payload: &Value, keys: &[&str]) -> Result<Option<T>, String> {
-    let Some(value) = find_payload_value(payload, keys) else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    serde_json::from_value(value.clone())
-        .map(Some)
-        .map_err(|error| format!("参数解析失败 {}: {}", keys[0], error))
-}
-
-fn find_payload_value<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a Value> {
-    let object = payload.as_object()?;
-    for key in keys {
-        if let Some(value) = object.get(*key) {
-            return Some(value);
-        }
-    }
-    None
 }

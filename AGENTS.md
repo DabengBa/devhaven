@@ -169,7 +169,8 @@ DevHaven 是一个基于 **Tauri + React** 的桌面应用，并已新增 **Web 
 
 ### M. Web 运行时桥接（HTTP/WS + 浏览器兜底）
 - 运行时探测与能力兜底：`src/platform/runtime.ts`（`isTauriRuntime`、`resolveRuntimeWindowLabel`、`resolveRuntimeClientId`、目录选择/confirm/openUrl/homeDir/version 的浏览器 fallback）
-- 命令桥接：`src/platform/commandClient.ts`（统一 `invokeCommand`；Web 下调用 `POST /api/cmd/{command}`）
+- 命令桥接：`src/platform/commandClient.ts`（统一 `invokeCommand`；Web 下调用 `POST /api/cmd/{command}`，按 HTTP status + 结构化错误体解析失败）
+- 命令目录与 Web 协议收口：`src-tauri/src/command_catalog.rs`（统一 Tauri/Web 命令清单、Web payload 解包、路径校验与结构化错误）；`src-tauri/src/lib.rs` 的 `invoke_handler` 与 `src-tauri/src/web_server.rs` 的 `/api/cmd/{command}` 共同消费该目录，避免命令漂移
 - 事件桥接：`src/platform/eventClient.ts`（统一 `listenEvent`；Web 下连接 `/api/ws`）
 - Rust Web 服务入口：`src-tauri/src/web_server.rs`（`/api/health`、`/api/cmd/{command}`、`/api/ws` + 前端静态资源路由 `/`、`/{*path}`）
 - 开发态单端口体感：`vite.config.ts` 配置 `/api` 代理到 Web API（优先 `DEVHAVEN_WEB_API_TARGET`，默认 `http://127.0.0.1:3210`），并从 `~/.devhaven/app_state.json` 读取 `settings.viteDevPort` 作为 Vite 端口（可由 `DEVHAVEN_VITE_PORT` 覆盖，需重启 Vite 生效）；`src/platform/runtime.ts` 在 `import.meta.env.DEV` 下走 `window.location.origin`

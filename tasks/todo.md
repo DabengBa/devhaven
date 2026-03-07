@@ -403,3 +403,38 @@
 - 根因不是单点渲染器，而是“App 全局三拍恢复”与 `TerminalPane` 内部多阶段恢复叠加，导致一次普通前后台切换也会触发多轮重绘与 `focus()`。
 - 本次收敛为：App 侧只负责在真正的恢复场景下发出一次 `app-resume` 事件，终端/编辑器内部保留各自的恢复补偿逻辑。
 - 去掉过宽的 `window.focus` 触发，并增加最小非活动时长阈值，避免普通切应用时误判为“系统唤醒”。
+
+---
+
+# 项目优化点审查（2026-03-07）任务清单
+
+- [x] 读取仓库规则与相关技能
+- [x] 扫描项目结构、依赖与构建配置
+- [x] 审查前端状态层、主编排与终端热点模块
+- [x] 审查 Rust/Tauri/Web bridge/存储与终端热点模块
+- [x] 运行前端构建，收集真实产物体积证据
+- [x] 汇总优化点并按优先级分层
+
+## Review
+- 前端主要问题集中在：全局状态广播范围过大、顶层编排与终端工作区过重、卡片视图缺少增量渲染，以及首包仍背负较多冷路径能力。
+- 后端主要问题集中在：Tauri/Web 双命令桥重复维护、核心模块职责过宽、项目扫描与终端状态存在性能/锁竞争热点、终端工作区存储存在整文件读改写放大。
+- 工程化短板较明显：缺少前端 lint/test 入口，发布工作流只覆盖 release，依赖管理同时存在 npm/pnpm 两套锁文件，容易带来漂移。
+- 已获得的硬证据包括：`npm run build` 成功，且产物中 `vendor-monaco`/worker 体积偏大，适合纳入下一轮性能优化。
+
+---
+
+# P0 命令桥统一改造任务清单
+
+- [x] 新建统一命令目录，作为 Tauri/Web 命令清单单一事实源
+- [x] 将 Tauri `invoke_handler` 改为从命令目录展开
+- [x] 将 Web `/api/cmd/{command}` 分发改为委托命令目录
+- [x] 将 Web 错误协议改为 HTTP status + 结构化错误体
+- [x] 同步前端 `commandClient` 解析新协议，并兼容旧成功包裹
+- [x] 为命令目录补充基础单测（清单子集、参数别名、错误响应）
+- [x] 回写 `AGENTS.md` 与任务复盘
+
+## Review
+- 新增 `src-tauri/src/command_catalog.rs`，集中承载命令清单、Web payload 别名兼容、路径 guard 与结构化错误响应，消除了 `lib.rs` 与 `web_server.rs` 双份命令表的维护风险。
+- `src-tauri/src/lib.rs` 现通过 catalog 宏生成 `invoke_handler`；`src-tauri/src/web_server.rs` 只保留 HTTP 路由与响应封装，旧的超长 `match` 与参数解包 helper 已移除。
+- Web 命令失败现在返回正确 HTTP 状态码与 `{ code, message, details? }` 错误体；前端 `src/platform/commandClient.ts` 已同步改为按 status 解析，并兼容旧 `{ ok, data }` 成功包裹。
+- 验证通过：`cargo test --manifest-path src-tauri/Cargo.toml command_catalog -- --nocapture`。
